@@ -5,93 +5,34 @@ const cors = require('cors');
 const app = express();
 
 // ==========================================
-// COMPREHENSIVE CORS CONFIGURATION
+// OPTIMIZED CONFIGURATION FOR VERCEL
 // ==========================================
 
-// CORS configuration to prevent CORS errors
-const corsOptions = {
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or Postman)
-    if (!origin) return callback(null, true);
-    
-    // Define allowed origins
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'http://localhost:3001', 
-      'http://localhost:5000',
-      'http://localhost:8080',
-      'https://cpunified.vercel.app',
-      'https://your-custom-domain.com',
-      // Add your actual frontend domains here
-    ];
-    
-    // Allow any Vercel app domains
-    if (origin.includes('.vercel.app') || 
-        origin.includes('localhost') || 
-        allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    
-    // For development, allow all origins
-    if (process.env.NODE_ENV !== 'production') {
-      return callback(null, true);
-    }
-    
-    callback(new Error('Not allowed by CORS'));
-  },
+// Reduced timeouts for serverless environment
+const API_TIMEOUT = 8000; // 8 seconds instead of 15
+const RATE_LIMIT_DELAY = 200; // Reduced from 500-1000ms
+const MAX_PLATFORMS = 3; // Limit concurrent platforms to avoid timeout
+
+// Simple CORS configuration for better performance
+app.use(cors({
+  origin: true,
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: [
-    'Origin',
-    'X-Requested-With', 
-    'Content-Type',
-    'Accept',
-    'Authorization',
-    'Cache-Control'
-  ],
-  optionsSuccessStatus: 200
-};
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
-// Apply CORS middleware
-app.use(cors(corsOptions));
+// Lightweight middleware
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-// Handle preflight requests
-app.options('*', cors(corsOptions));
-
-// ==========================================
-// MIDDLEWARE CONFIGURATION
-// ==========================================
-
-// Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Add security headers
+// Simple request logging
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  
-  // Security headers
-  res.header('X-Content-Type-Options', 'nosniff');
-  res.header('X-Frame-Options', 'DENY');
-  res.header('X-XSS-Protection', '1; mode=block');
-  
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
-  }
-});
-
-// Request logging middleware
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  console.log(`${req.method} ${req.path}`);
   next();
 });
 
 // ==========================================
-// PLATFORM API CLASSES (OPTIMIZED FOR DEPLOYMENT)
+// OPTIMIZED PLATFORM API CLASSES
 // ==========================================
 
 class MultiPlatformAPI {
@@ -107,8 +48,7 @@ class MultiPlatformAPI {
             interviewbit: new InterviewBitAPI(),
             codestudio: new CodeStudioAPI()
         };
-        // Reduced delay for serverless environments
-        this.rateLimitDelay = process.env.NODE_ENV === 'production' ? 500 : 1000;
+        this.rateLimitDelay = RATE_LIMIT_DELAY;
     }
 
     async sleep(ms) {
@@ -119,36 +59,27 @@ class MultiPlatformAPI {
 class LeetCodeAPI {
     constructor() {
         this.baseURL = 'https://alfa-leetcode-api.onrender.com';
-        this.timeout = 15000; // 15 second timeout
+        this.timeout = API_TIMEOUT;
     }
 
     async getUserData(username) {
         try {
-            const [profile, submissions, contest] = await Promise.allSettled([
-                axios.get(`${this.baseURL}/${username}`, { 
-                    timeout: this.timeout,
-                    headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
-                }),
-                axios.get(`${this.baseURL}/${username}/submission`, { 
-                    timeout: this.timeout,
-                    headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
-                }),
-                axios.get(`${this.baseURL}/${username}/contest`, { 
-                    timeout: this.timeout,
-                    headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
-                })
-            ]);
+            // Only fetch profile for faster response
+            const profile = await axios.get(`${this.baseURL}/${username}`, { 
+                timeout: this.timeout,
+                headers: { 'User-Agent': 'CP-Unified-API' }
+            });
 
             return {
                 status: "OK",
                 platform: "leetcode",
                 username: username,
-                profile: profile.status === 'fulfilled' ? profile.value.data : null,
-                submissions: submissions.status === 'fulfilled' ? submissions.value.data : null,
-                contests: contest.status === 'fulfilled' ? contest.value.data : null
+                profile: profile.data,
+                // Skip heavy data for performance
+                submissions: null,
+                contests: null
             };
         } catch (error) {
-            console.error(`LeetCode API Error for ${username}:`, error.message);
             return { 
                 status: "FAILED", 
                 platform: "leetcode", 
@@ -162,38 +93,27 @@ class LeetCodeAPI {
 class CodeForcesAPI {
     constructor() {
         this.baseURL = 'https://codeforces.com/api';
-        this.timeout = 10000;
+        this.timeout = API_TIMEOUT;
     }
 
     async getUserData(handle) {
         try {
-            await this.sleep(800); // Reduced delay for serverless
-            
-            const [userInfo, ratings, submissions] = await Promise.allSettled([
-                axios.get(`${this.baseURL}/user.info?handles=${handle}`, { 
-                    timeout: this.timeout,
-                    headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
-                }),
-                axios.get(`${this.baseURL}/user.rating?handle=${handle}`, { 
-                    timeout: this.timeout,
-                    headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
-                }),
-                axios.get(`${this.baseURL}/user.status?handle=${handle}&count=100`, { 
-                    timeout: this.timeout,
-                    headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
-                })
-            ]);
+            // Only fetch user info for performance
+            const userInfo = await axios.get(`${this.baseURL}/user.info?handles=${handle}`, { 
+                timeout: this.timeout,
+                headers: { 'User-Agent': 'CP-Unified-API' }
+            });
 
             return {
                 status: "OK",
                 platform: "codeforces",
                 username: handle,
-                profile: userInfo.status === 'fulfilled' ? userInfo.value.data : null,
-                ratings: ratings.status === 'fulfilled' ? ratings.value.data : null,
-                submissions: submissions.status === 'fulfilled' ? submissions.value.data : null
+                profile: userInfo.data,
+                // Skip heavy data
+                ratings: null,
+                submissions: null
             };
         } catch (error) {
-            console.error(`CodeForces API Error for ${handle}:`, error.message);
             return { 
                 status: "FAILED", 
                 platform: "codeforces", 
@@ -202,23 +122,19 @@ class CodeForcesAPI {
             };
         }
     }
-
-    async sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
 }
 
 class CodeChefAPI {
     constructor() {
         this.baseURL = 'https://codechef-api.vercel.app/handle';
-        this.timeout = 10000;
+        this.timeout = API_TIMEOUT;
     }
 
     async getUserData(handle) {
         try {
             const response = await axios.get(`${this.baseURL}/${handle}`, { 
                 timeout: this.timeout,
-                headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
+                headers: { 'User-Agent': 'CP-Unified-API' }
             });
             return {
                 status: "OK",
@@ -227,7 +143,6 @@ class CodeChefAPI {
                 data: response.data
             };
         } catch (error) {
-            console.error(`CodeChef API Error for ${handle}:`, error.message);
             return { 
                 status: "FAILED", 
                 platform: "codechef", 
@@ -241,14 +156,14 @@ class CodeChefAPI {
 class GeeksForGeeksAPI {
     constructor() {
         this.baseURL = 'https://geeks-for-geeks-api.vercel.app';
-        this.timeout = 10000;
+        this.timeout = API_TIMEOUT;
     }
 
     async getUserData(username) {
         try {
             const response = await axios.get(`${this.baseURL}/${username}`, { 
                 timeout: this.timeout,
-                headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
+                headers: { 'User-Agent': 'CP-Unified-API' }
             });
             return {
                 status: "OK",
@@ -257,7 +172,6 @@ class GeeksForGeeksAPI {
                 data: response.data
             };
         } catch (error) {
-            console.error(`GeeksForGeeks API Error for ${username}:`, error.message);
             return { 
                 status: "FAILED", 
                 platform: "geeksforgeeks", 
@@ -274,7 +188,7 @@ class HackerRankAPI {
             status: "NOT_AVAILABLE",
             platform: "hackerrank",
             username: username,
-            comment: "HackerRank requires private API access or web scraping"
+            comment: "HackerRank requires private API access"
         };
     }
 }
@@ -282,31 +196,25 @@ class HackerRankAPI {
 class AtCoderAPI {
     constructor() {
         this.baseURL = 'https://kenkoooo.com/atcoder/atcoder-api';
-        this.timeout = 10000;
+        this.timeout = API_TIMEOUT;
     }
 
     async getUserData(username) {
         try {
-            const [submissions, rankInfo] = await Promise.allSettled([
-                axios.get(`${this.baseURL}/v3/user/submissions?user=${username}&from_second=0`, { 
-                    timeout: this.timeout,
-                    headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
-                }),
-                axios.get(`${this.baseURL}/v3/user/ac_rank?user=${username}`, { 
-                    timeout: this.timeout,
-                    headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
-                })
-            ]);
+            // Only fetch basic submissions count
+            const submissions = await axios.get(`${this.baseURL}/v3/user/submissions?user=${username}&from_second=0`, { 
+                timeout: this.timeout,
+                headers: { 'User-Agent': 'CP-Unified-API' }
+            });
 
             return {
                 status: "OK",
                 platform: "atcoder",
                 username: username,
-                submissions: submissions.status === 'fulfilled' ? submissions.value.data : null,
-                rank_info: rankInfo.status === 'fulfilled' ? rankInfo.value.data : null
+                submissions: submissions.data ? submissions.data.slice(0, 10) : null, // Limit data
+                rank_info: null
             };
         } catch (error) {
-            console.error(`AtCoder API Error for ${username}:`, error.message);
             return { 
                 status: "FAILED", 
                 platform: "atcoder", 
@@ -320,46 +228,35 @@ class AtCoderAPI {
 class GitHubAPI {
     constructor() {
         this.baseURL = 'https://api.github.com';
-        this.timeout = 10000;
+        this.timeout = API_TIMEOUT;
     }
 
     async getUserData(username) {
         try {
             const headers = {
-                'User-Agent': 'MultiPlatform-Dashboard-API',
+                'User-Agent': 'CP-Unified-API',
                 'Accept': 'application/vnd.github.v3+json'
             };
 
-            // Add GitHub token if available in environment
             if (process.env.GITHUB_TOKEN) {
                 headers['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
             }
 
-            const [profile, repos, events] = await Promise.allSettled([
-                axios.get(`${this.baseURL}/users/${username}`, { 
-                    timeout: this.timeout, 
-                    headers 
-                }),
-                axios.get(`${this.baseURL}/users/${username}/repos?sort=updated&per_page=10`, { 
-                    timeout: this.timeout, 
-                    headers 
-                }),
-                axios.get(`${this.baseURL}/users/${username}/events/public?per_page=10`, { 
-                    timeout: this.timeout, 
-                    headers 
-                })
-            ]);
+            // Only fetch profile for performance
+            const profile = await axios.get(`${this.baseURL}/users/${username}`, { 
+                timeout: this.timeout, 
+                headers 
+            });
 
             return {
                 status: "OK",
                 platform: "github",
                 username: username,
-                profile: profile.status === 'fulfilled' ? profile.value.data : null,
-                repositories: repos.status === 'fulfilled' ? repos.value.data : null,
-                recent_activity: events.status === 'fulfilled' ? events.value.data : null
+                profile: profile.data,
+                repositories: null, // Skip for performance
+                recent_activity: null
             };
         } catch (error) {
-            console.error(`GitHub API Error for ${username}:`, error.message);
             return { 
                 status: "FAILED", 
                 platform: "github", 
@@ -399,9 +296,6 @@ class CodeStudioAPI {
 function generateAggregatedStats(platformData) {
     const stats = {
         platforms_connected: 0,
-        total_problems_solved: 0,
-        total_contests: 0,
-        overall_rating: 0,
         platform_breakdown: {},
         summary: {
             successful_platforms: [],
@@ -434,7 +328,6 @@ function extractPlatformStats(platform, data) {
                 easy_solved: data.profile?.easySolved || 0,
                 medium_solved: data.profile?.mediumSolved || 0,
                 hard_solved: data.profile?.hardSolved || 0,
-                contests_attended: data.contests?.contestAttend || 0,
                 rating: data.profile?.ranking || 0
             };
         
@@ -444,12 +337,7 @@ function extractPlatformStats(platform, data) {
                 username: data.username,
                 rating: userInfo?.rating || 0,
                 max_rating: userInfo?.maxRating || 0,
-                rank: userInfo?.rank || "unrated",
-                contests_attended: data.ratings?.result?.length || 0,
-                problems_solved: data.submissions?.result ? 
-                    new Set(data.submissions.result
-                        .filter(s => s.verdict === "OK")
-                        .map(s => `${s.problem.contestId}-${s.problem.index}`)).size : 0
+                rank: userInfo?.rank || "unrated"
             };
         
         case 'codechef':
@@ -457,35 +345,27 @@ function extractPlatformStats(platform, data) {
                 username: data.username,
                 rating: data.data?.currentRating || 0,
                 max_rating: data.data?.highestRating || 0,
-                problems_solved: data.data?.totalProblemsolved || 0,
-                contests_attended: data.data?.contestsAttended || 0,
-                global_rank: data.data?.globalRank || 0,
-                country_rank: data.data?.countryRank || 0
+                problems_solved: data.data?.totalProblemsolved || 0
             };
         
         case 'geeksforgeeks':
             return {
                 username: data.username,
                 problems_solved: data.data?.totalProblemsSolved || 0,
-                overall_score: data.data?.overallScore || 0,
-                monthly_score: data.data?.monthlyScore || 0,
-                rank: data.data?.rank || 0
+                overall_score: data.data?.overallScore || 0
             };
         
         case 'github':
             return {
                 username: data.username,
                 public_repos: data.profile?.public_repos || 0,
-                followers: data.profile?.followers || 0,
-                following: data.profile?.following || 0,
-                recent_commits: data.recent_activity?.length || 0
+                followers: data.profile?.followers || 0
             };
         
         case 'atcoder':
             return {
                 username: data.username,
-                submissions_count: data.submissions?.length || 0,
-                rank_info: data.rank_info || null
+                submissions_count: data.submissions?.length || 0
             };
         
         default:
@@ -497,18 +377,18 @@ function extractPlatformStats(platform, data) {
 const multiAPI = new MultiPlatformAPI();
 
 // ==========================================
-// API ROUTES
+// API ROUTES (OPTIMIZED FOR VERCEL)
 // ==========================================
 
 // Root route
 app.get('/', (req, res) => {
     res.json({
         status: "OK",
-        message: "Multi-Platform Dashboard API",
-        version: "2.0.0",
-        documentation: "/api/health",
+        message: "CP-Unified Multi-Platform Dashboard API",
+        version: "3.0.0",
         endpoints: {
             health: "GET /api/health",
+            test: "GET /api/test", 
             aggregated_dashboard: "POST /api/dashboard/aggregated",
             single_user: "GET /api/dashboard/aggregated/:username",
             platform_status: "GET /api/platforms/status"
@@ -516,44 +396,74 @@ app.get('/', (req, res) => {
     });
 });
 
-// Main aggregated dashboard endpoint
-app.post('/api/dashboard/aggregated', async (req, res) => {
-    const { usernames } = req.body;
+// Simple test endpoint
+app.get('/api/test', (req, res) => {
+    res.json({
+        status: "OK",
+        message: "API is working perfectly!",
+        timestamp: new Date().toISOString(),
+        vercel_deployment: "SUCCESS"
+    });
+});
 
-    if (!usernames || typeof usernames !== 'object') {
-        return res.status(400).json({
-            status: "FAILED",
-            comment: "usernames object is required with platform-specific usernames",
-            example: {
-                usernames: {
-                    leetcode: "john_doe",
-                    codeforces: "johnD",
-                    codechef: "john123",
-                    github: "johndoe",
-                    geeksforgeeks: "john.doe"
-                }
-            }
-        });
-    }
+// Optimized main aggregated dashboard endpoint
+app.post('/api/dashboard/aggregated', async (req, res) => {
+    const startTime = Date.now();
+    
+    // Set response timeout
+    const timeout = setTimeout(() => {
+        if (!res.headersSent) {
+            res.status(408).json({
+                status: "TIMEOUT",
+                comment: "Request timeout - processing took too long",
+                suggestion: "Try with fewer platforms or check platform status"
+            });
+        }
+    }, 25000); // 25 seconds timeout
 
     try {
+        const { usernames } = req.body;
+
+        if (!usernames || typeof usernames !== 'object' || Object.keys(usernames).length === 0) {
+            clearTimeout(timeout);
+            return res.status(400).json({
+                status: "FAILED",
+                comment: "usernames object is required with platform-specific usernames",
+                example: {
+                    usernames: {
+                        leetcode: "john_doe",
+                        codeforces: "tourist", 
+                        github: "torvalds"
+                    }
+                }
+            });
+        }
+
         const result = {
             status: "OK",
             timestamp: new Date().toISOString(),
             usernames: usernames,
             platforms: {},
-            aggregated_stats: {}
+            aggregated_stats: {},
+            processing_time: null
         };
 
-        console.log(`Fetching data for usernames:`, usernames);
+        // Limit to first 3 platforms to avoid timeout
+        const limitedUsernames = Object.fromEntries(
+            Object.entries(usernames).slice(0, MAX_PLATFORMS)
+        );
 
-        // Fetch data with improved error handling
-        const fetchPromises = Object.entries(usernames).map(async ([platform, username]) => {
+        console.log(`Processing ${Object.keys(limitedUsernames).length} platforms:`, Object.keys(limitedUsernames));
+
+        // Sequential processing to avoid overwhelming external APIs
+        for (const [platform, username] of Object.entries(limitedUsernames)) {
             if (multiAPI.platforms[platform] && username) {
                 try {
-                    console.log(`Fetching ${platform} data for username: ${username}`);
+                    console.log(`Fetching ${platform} data for: ${username}`);
                     const data = await multiAPI.platforms[platform].getUserData(username);
                     result.platforms[platform] = data;
+                    
+                    // Small delay between requests
                     await multiAPI.sleep(multiAPI.rateLimitDelay);
                 } catch (error) {
                     console.error(`Error fetching ${platform} data:`, error);
@@ -565,53 +475,54 @@ app.post('/api/dashboard/aggregated', async (req, res) => {
                     };
                 }
             }
-        });
-
-        await Promise.all(fetchPromises);
+        }
 
         // Generate aggregated statistics
         result.aggregated_stats = generateAggregatedStats(result.platforms);
+        result.processing_time = `${Date.now() - startTime}ms`;
 
-        console.log('Aggregated dashboard data fetched successfully');
-        res.json(result);
+        clearTimeout(timeout);
+        
+        if (!res.headersSent) {
+            console.log(`Request completed in ${result.processing_time}`);
+            res.json(result);
+        }
 
     } catch (error) {
+        clearTimeout(timeout);
         console.error('Error in aggregated dashboard:', error);
-        res.status(500).json({
-            status: "FAILED",
-            comment: error.message,
-            timestamp: new Date().toISOString()
-        });
+        if (!res.headersSent) {
+            res.status(500).json({
+                status: "FAILED",
+                comment: error.message,
+                timestamp: new Date().toISOString()
+            });
+        }
     }
 });
 
-// Single username fallback
+// Simple single username endpoint
 app.get('/api/dashboard/aggregated/:username', async (req, res) => {
     const { username } = req.params;
-    const { platforms = 'leetcode,codeforces,codechef,geeksforgeeks,github,atcoder' } = req.query;
-
-    const requestedPlatforms = platforms.split(',');
+    const { platforms = 'leetcode,github' } = req.query; // Default to fast platforms
 
     try {
+        const requestedPlatforms = platforms.split(',').slice(0, 2); // Limit to 2 platforms
+
         const result = {
             status: "OK",
             username: username,
             timestamp: new Date().toISOString(),
             platforms: {},
-            aggregated_stats: {},
-            note: "This endpoint assumes same username across all platforms. Use POST /api/dashboard/aggregated for different usernames."
+            note: "Limited to 2 platforms for optimal performance"
         };
-
-        console.log(`Fetching data for ${username} from platforms: ${requestedPlatforms.join(', ')}`);
 
         for (const platform of requestedPlatforms) {
             if (multiAPI.platforms[platform]) {
                 try {
-                    console.log(`Fetching ${platform} data...`);
                     result.platforms[platform] = await multiAPI.platforms[platform].getUserData(username);
-                    await multiAPI.sleep(multiAPI.rateLimitDelay);
+                    await multiAPI.sleep(200);
                 } catch (error) {
-                    console.error(`Error fetching ${platform}:`, error);
                     result.platforms[platform] = {
                         status: "FAILED",
                         platform: platform,
@@ -626,11 +537,9 @@ app.get('/api/dashboard/aggregated/:username', async (req, res) => {
         res.json(result);
 
     } catch (error) {
-        console.error('Error in aggregated dashboard:', error);
         res.status(500).json({
             status: "FAILED",
-            comment: error.message,
-            timestamp: new Date().toISOString()
+            comment: error.message
         });
     }
 });
@@ -638,26 +547,23 @@ app.get('/api/dashboard/aggregated/:username', async (req, res) => {
 // Platform status endpoint
 app.get('/api/platforms/status', (req, res) => {
     const platformStatus = {
-        leetcode: "Available - Profile, submissions, contests",
-        codeforces: "Available - Profile, ratings, submissions", 
-        codechef: "Available - Profile, contests, problems solved",
-        geeksforgeeks: "Available - Profile, problems solved, scores",
-        github: "Available - Profile, repositories, activity",
-        atcoder: "Available - Submissions, rankings",
-        hackerrank: "Not Available - Requires private API",
-        interviewbit: "Not Available - No public API",
-        codestudio: "Not Available - No public API"
+        leetcode: "Available - Fast",
+        codeforces: "Available - Medium Speed", 
+        codechef: "Available - Medium Speed",
+        geeksforgeeks: "Available - Fast",
+        github: "Available - Fast",
+        atcoder: "Available - Slow",
+        hackerrank: "Not Available",
+        interviewbit: "Not Available",
+        codestudio: "Not Available"
     };
 
     res.json({
         status: "OK",
         timestamp: new Date().toISOString(),
         platforms: platformStatus,
-        available_platforms: Object.keys(platformStatus).filter(p => 
-            platformStatus[p].includes("Available")
-        ),
-        cors_enabled: true,
-        deployment_ready: true
+        recommended_for_fast_response: ["leetcode", "github", "geeksforgeeks"],
+        vercel_optimized: true
     });
 });
 
@@ -665,63 +571,56 @@ app.get('/api/platforms/status', (req, res) => {
 app.get('/api/health', (req, res) => {
     res.json({
         status: "OK",
-        message: "Multi-Platform Dashboard API - Deployment Ready",
-        version: "2.0.0",
+        message: "CP-Unified API - Vercel Optimized",
+        version: "3.0.0",
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development',
-        cors_enabled: true,
-        supported_platforms: Object.keys(multiAPI.platforms),
-        endpoints: [
-            'POST /api/dashboard/aggregated - Aggregated dashboard with different usernames',
-            'GET /api/dashboard/aggregated/:username - Single username across platforms',
-            'GET /api/platforms/status - Platform availability',
-            'GET /api/health - Health check'
-        ],
-        deployment: {
-            vercel_ready: true,
-            netlify_ready: true,
-            railway_ready: true,
-            render_ready: true
-        }
+        deployment: "Vercel Ready",
+        optimizations: [
+            "Reduced API timeouts",
+            "Limited concurrent requests",
+            "Sequential processing",
+            "Lightweight responses",
+            "Function timeout handling"
+        ]
     });
 });
 
 // Global error handler
 app.use((error, req, res, next) => {
     console.error('Unhandled error:', error);
-    res.status(500).json({
-        status: "FAILED",
-        comment: "Internal server error",
-        timestamp: new Date().toISOString(),
-        error: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
-    });
+    if (!res.headersSent) {
+        res.status(500).json({
+            status: "FAILED",
+            comment: "Internal server error",
+            timestamp: new Date().toISOString()
+        });
+    }
 });
 
 // 404 handler
 app.use('*', (req, res) => {
     res.status(404).json({
-        status: "FAILED",
+        status: "NOT_FOUND",
         comment: "Endpoint not found",
         available_endpoints: [
             'GET /',
+            'GET /api/test',
             'GET /api/health', 
             'POST /api/dashboard/aggregated',
-            'GET /api/dashboard/aggregated/:username',
             'GET /api/platforms/status'
         ]
     });
 });
 
-// Export for serverless deployment
+// Export for Vercel
 module.exports = app;
 
-// Start server only if not in serverless environment
+// Only start server if not in serverless environment
 if (require.main === module) {
     const PORT = process.env.PORT || 5000;
     app.listen(PORT, () => {
-        console.log(`🚀 Multi-Platform Dashboard API running on port ${PORT}`);
-        console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
-        console.log(`🎯 CORS enabled for all origins in development`);
-        console.log(`🌍 Deployment ready for Vercel, Netlify, Railway, Render`);
+        console.log(`🚀 CP-Unified API running on port ${PORT}`);
+        console.log(`🔗 https://cp-unified.vercel.app/api/health`);
     });
 }
