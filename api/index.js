@@ -291,25 +291,23 @@ class CodeForcesAPI {
 
     async getUserData(handle) {
         try {
-            await this.sleep(400); // Rate limiting
+            await this.sleep(400);
             
             const [userInfo, ratings, submissions] = await Promise.allSettled([
                 this.fetchWithRetry(`${this.baseURL}/user.info?handles=${handle}`),
                 this.fetchWithRetry(`${this.baseURL}/user.rating?handle=${handle}`),
-                this.fetchWithRetry(`${this.baseURL}/user.status?handle=${handle}&count=100`)
+                this.fetchWithRetry(`${this.baseURL}/user.status?handle=${handle}&from=1&count=10000`) // Increased count
             ]);
 
-            const userData = userInfo.status === 'fulfilled' ? userInfo.value.data : null;
-            const ratingsData = ratings.status === 'fulfilled' ? ratings.value.data : null;
-            const submissionsData = submissions.status === 'fulfilled' ? submissions.value.data : null;
+            const userData = userInfo.status === 'fulfilled' ? userInfo.value.data?.result?.[0] : null;
+            const ratingsData = ratings.status === 'fulfilled' ? ratings.value.data?.result : null;
+            const submissionsData = submissions.status === 'fulfilled' ? submissions.value.data?.result : null;
 
             return {
                 status: "OK",
                 platform: "codeforces",
                 username: handle,
                 profile: userData,
-                ratings: ratingsData,
-                submissions: submissionsData,
                 detailed_stats: this.calculateDetailedStats(userData, ratingsData, submissionsData)
             };
         } catch (error) {
@@ -337,132 +335,110 @@ class CodeForcesAPI {
         }
     }
 
-calculateDetailedStats(profile, submissions, contests) {
-  let totalSolved = 0;
-  let easySolved = 0;
-  let mediumSolved = 0;
-  let hardSolved = 0;
+    calculateDetailedStats(profile, ratings, submissions) {
+        if (!profile) return {};
 
-  if (profile) {
-    // If these fields exist on the root, use them directly
-    totalSolved = profile.totalSolved ?? 0;
-    easySolved = profile.easySolved ?? 0;
-    mediumSolved = profile.mediumSolved ?? 0;
-    hardSolved = profile.hardSolved ?? 0;
+        // Calculate ALL unique problems solved from submissions
+        let problemsSolved = 0;
+        const solvedProblems = new Set();
+        
+        if (submissions) {
+            submissions.forEach(sub => {
+                if (sub.verdict === 'OK') {
+                    const problemKey = `${sub.problem.contestId}-${sub.problem.index}`;
+                    solvedProblems.add(problemKey);
+                }
+            });
+            problemsSolved = solvedProblems.size;
+        }
 
-    // If still zero, try to fetch from nested data structure (e.g., from GraphQL-like response)
-    if (
-      totalSolved === 0 &&
-      profile.matchedUser &&
-      profile.matchedUser.submitStatsGlobal &&
-      Array.isArray(profile.matchedUser.submitStatsGlobal.acSubmissionNum)
-    ) {
-      profile.matchedUser.submitStatsGlobal.acSubmissionNum.forEach((item) => {
-        let diff = (item.difficulty ?? "").toLowerCase();
-        let count = item.count ?? 0;
-        totalSolved += count;
+        // Get rating info
+        const currentRating = profile.rating || 0;
+        const maxRating = profile.maxRating || currentRating;
+        const rank = profile.rank || "unrated";
+        const maxRank = profile.maxRank || rank;
 
-        if (diff === "easy") easySolved = count;
-        else if (diff === "medium") mediumSolved = count;
-        else if (diff === "hard") hardSolved = count;
-      });
+        // Calculate contest stats
+        const contestsParticipated = ratings ? ratings.length : 0;
+        const acceptanceRate = submissions && submissions.length > 0 ? 
+            ((submissions.filter(s => s.verdict === 'OK').length / submissions.length) * 100).toFixed(2) : 0;
+
+        return {
+            current_rating: currentRating,
+            max_rating: maxRating,
+            rank: rank,
+            max_rank: maxRank,
+            problems_solved: problemsSolved, // This now correctly counts ALL unique problems
+            contests_participated: contestsParticipated,
+            acceptance_rate: parseFloat(acceptanceRate),
+            total_submissions: submissions ? submissions.length : 0,
+            contribution: profile.contribution || 0,
+            last_online: profile.lastOnlineTimeSeconds ? 
+                new Date(profile.lastOnlineTimeSeconds * 1000).toISOString() : null
+        };
     }
-  }
-
-  const acceptanceRate = profile?.acceptanceRate ?? 0;
-  const ranking = profile?.ranking ?? 0;
-  const contributionPoints = profile?.contributionPoints ?? 0;
-  const reputation = profile?.reputation ?? 0;
-  const contestsAttended = contests?.contestAttend ?? 0;
-  const contestRating = contests?.contestRating ?? 0;
-  const contestRanking = contests?.contestRanking ?? contests?.contestGlobalRanking ?? 0;
-
-  const recentSubs = Array.isArray(submissions?.submission) ? submissions.submission.slice(0, 10) : [];
-  const totalSubmissions = submissions?.submission?.length ?? 0;
-  const acceptedSubmissions = recentSubs.filter((s) => s.statusDisplay === "Accepted").length;
-
-  return {
-    totalSolved,
-    easySolved,
-    mediumSolved,
-    hardSolved,
-    acceptanceRate,
-    ranking,
-    contributionPoints,
-    reputation,
-    contestsAttended,
-    contestRating,
-    contestRanking,
-    recentSubs,
-    submissionStats: {
-      totalSubmissions,
-      acceptedSubmissions,
-    },
-  };
-}
-
-
 
     async sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 }
 
+
+
 class CodeChefAPI {
     constructor() {
-        this.timeout = 10000; // 10 seconds timeout
+        this.timeout = 15000; // Increased timeout
     }
 
     async getUserData(handle) {
         try {
             console.log(`Fetching CodeChef data for: ${handle}`);
             
-            // Fetch the CodeChef profile page directly
             const response = await axios.get(`https://www.codechef.com/users/${handle}`, {
                 timeout: this.timeout,
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1'
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Cache-Control': 'no-cache'
                 }
             });
 
             if (response.status === 200) {
                 const htmlData = response.data;
-                
-                // Parse the HTML using JSDOM
                 const dom = new JSDOM(htmlData);
                 const document = dom.window.document;
 
-                // Extract heatmap data
-                let heatMapData = null;
-                try {
-                    const heatMapStart = htmlData.search("var userDailySubmissionsStats =") + "var userDailySubmissionsStats =".length;
-                    const heatMapEnd = htmlData.search("'#js-heatmap") - 34;
-                    if (heatMapStart > -1 && heatMapEnd > heatMapStart) {
-                        const heatDataString = htmlData.substring(heatMapStart, heatMapEnd);
-                        heatMapData = JSON.parse(heatDataString);
-                    }
-                } catch (e) {
-                    console.log('Could not parse heatmap data');
+                // Method 1: Try to extract from problems solved section
+                let totalProblemsSolved = this.extractProblemsFromSection(document, htmlData);
+
+                // Method 2: If not found, try heatmap data (fallback)
+                if (totalProblemsSolved === 0) {
+                    totalProblemsSolved = this.extractProblemsFromHeatmap(htmlData);
+                }
+
+                // Method 3: Try to extract from profile stats section
+                if (totalProblemsSolved === 0) {
+                    totalProblemsSolved = this.extractFromProfileStats(document);
                 }
 
                 // Extract rating data
                 let ratingData = null;
+                let highestRating = 0;
                 try {
                     const allRatingStart = htmlData.search("var all_rating = ") + "var all_rating = ".length;
                     const allRatingEnd = htmlData.search("var current_user_rating =") - 6;
                     if (allRatingStart > -1 && allRatingEnd > allRatingStart) {
                         ratingData = JSON.parse(htmlData.substring(allRatingStart, allRatingEnd));
+                        if (ratingData && ratingData.length > 0) {
+                            highestRating = Math.max(...ratingData.map(r => r.rating || 0));
+                        }
                     }
                 } catch (e) {
-                    console.log('Could not parse rating data');
+                    console.log('Could not parse rating data:', e.message);
                 }
 
-                // Extract profile information using DOM parsing
+                // Extract profile information
                 const userDetailsContainer = document.querySelector(".user-details-container");
                 const ratingNumber = document.querySelector(".rating-number");
                 const ratingRanks = document.querySelector(".rating-ranks");
@@ -470,16 +446,9 @@ class CodeChefAPI {
                 const userCountryName = document.querySelector(".user-country-name");
                 const ratingElement = document.querySelector(".rating");
 
-                // Calculate total problems solved from heatmap data
-                let totalProblemsolved = 0;
-                if (heatMapData) {
-                    Object.values(heatMapData).forEach(dayData => {
-                        if (typeof dayData === 'object' && dayData.value) {
-                            totalProblemsolved += parseInt(dayData.value) || 0;
-                        } else if (typeof dayData === 'number') {
-                            totalProblemsolved += dayData;
-                        }
-                    });
+                const currentRating = parseInt(ratingNumber?.textContent) || 0;
+                if (highestRating === 0) {
+                    highestRating = currentRating;
                 }
 
                 return {
@@ -493,34 +462,15 @@ class CodeChefAPI {
                         countryName: userCountryName?.textContent?.trim() || null,
                         username: handle
                     },
-                    data: {
-                        // Main stats for compatibility with existing code
-                        currentRating: parseInt(ratingNumber?.textContent) || 0,
-                        highestRating: parseInt(ratingNumber?.parentNode?.children[4]?.textContent?.split("Rating")[1]) || 0,
-                        globalRank: parseInt(ratingRanks?.children[0]?.children[0]?.children[0]?.children[0]?.innerHTML) || 0,
-                        countryRank: parseInt(ratingRanks?.children[0]?.children[1]?.children[0]?.children[0]?.innerHTML) || 0,
-                        stars: ratingElement?.textContent?.trim() || "unrated",
-                        totalProblemsolved: totalProblemsolved,
-                        
-                        // Additional data
-                        name: userDetailsContainer?.children[0]?.children[1]?.textContent?.trim() || handle,
-                        countryName: userCountryName?.textContent?.trim() || null,
-                        
-                        // Set contests attended (you might need to scrape this separately or estimate)
-                        contestsAttended: ratingData ? ratingData.length : 0
-                    },
-                    // Raw data for advanced usage
-                    heatMap: heatMapData,
-                    ratingData: ratingData,
                     detailed_stats: {
-                        current_rating: parseInt(ratingNumber?.textContent) || 0,
-                        highest_rating: parseInt(ratingNumber?.parentNode?.children[4]?.textContent?.split("Rating")[1]) || 0,
-                        problems_solved: totalProblemsolved,
+                        current_rating: currentRating,
+                        highest_rating: highestRating,
+                        problems_solved: totalProblemsSolved,
                         contests_attended: ratingData ? ratingData.length : 0,
                         global_rank: parseInt(ratingRanks?.children[0]?.children[0]?.children[0]?.children[0]?.innerHTML) || 0,
                         country_rank: parseInt(ratingRanks?.children[0]?.children[1]?.children[0]?.children[0]?.innerHTML) || 0,
                         stars: ratingElement?.textContent?.trim() || "unrated",
-                        division: this.getDivisionFromRating(parseInt(ratingNumber?.textContent) || 0)
+                        division: this.getDivisionFromRating(currentRating)
                     }
                 };
             } else {
@@ -529,7 +479,6 @@ class CodeChefAPI {
         } catch (error) {
             console.error(`CodeChef API Error for ${handle}:`, error.message);
             
-            // Handle specific error cases
             if (error.response?.status === 404) {
                 return {
                     status: "FAILED",
@@ -555,6 +504,126 @@ class CodeChefAPI {
         }
     }
 
+    // Method 1: Extract from problems solved section
+    extractProblemsFromSection(document, htmlData) {
+        try {
+            // Look for problems solved in various places
+            const problemsSolvedElements = document.querySelectorAll('.problems-solved, .rating-number, .rating-data-section');
+            
+            for (let element of problemsSolvedElements) {
+                const text = element.textContent;
+                if (text && text.includes('Problems Solved')) {
+                    const match = text.match(/(\d+)/);
+                    if (match) {
+                        return parseInt(match[1]);
+                    }
+                }
+            }
+
+            // Try to find in script tags or data attributes
+            const scriptMatch = htmlData.match(/problems[_\s]*solved["\s]*:\s*(\d+)/i);
+            if (scriptMatch) {
+                return parseInt(scriptMatch[1]);
+            }
+
+            // Look for total problems in user stats
+            const statsMatch = htmlData.match(/"total[_\s]*problems[_\s]*solved"[:\s]*(\d+)/i);
+            if (statsMatch) {
+                return parseInt(statsMatch[1]);
+            }
+
+        } catch (e) {
+            console.log('Method 1 failed:', e.message);
+        }
+        return 0;
+    }
+
+    // Method 2: Extract from heatmap (improved)
+    extractProblemsFromHeatmap(htmlData) {
+        let totalProblemsSolved = 0;
+        try {
+            // Try multiple heatmap variable names
+            const heatmapPatterns = [
+                "var userDailySubmissionsStats =",
+                "userDailySubmissionsStats =",
+                "var heatmapData =",
+                "heatmapData =",
+                "dailySubmissions ="
+            ];
+
+            for (let pattern of heatmapPatterns) {
+                const heatMapStart = htmlData.search(pattern);
+                if (heatMapStart > -1) {
+                    const dataStart = heatMapStart + pattern.length;
+                    let dataEnd = htmlData.indexOf(';', dataStart);
+                    if (dataEnd === -1) dataEnd = htmlData.indexOf('\n', dataStart);
+                    if (dataEnd === -1) continue;
+
+                    try {
+                        const heatDataString = htmlData.substring(dataStart, dataEnd).trim();
+                        const heatMapData = JSON.parse(heatDataString);
+                        
+                        if (typeof heatMapData === 'object') {
+                            Object.values(heatMapData).forEach(dayData => {
+                                if (typeof dayData === 'object' && dayData.value) {
+                                    totalProblemsSolved += parseInt(dayData.value) || 0;
+                                } else if (typeof dayData === 'object' && dayData.solved) {
+                                    totalProblemsSolved += parseInt(dayData.solved) || 0;
+                                } else if (typeof dayData === 'number') {
+                                    totalProblemsSolved += dayData;
+                                }
+                            });
+                        }
+                        
+                        if (totalProblemsSolved > 0) break;
+                    } catch (e) {
+                        continue;
+                    }
+                }
+            }
+        } catch (e) {
+            console.log('Method 2 failed:', e.message);
+        }
+        return totalProblemsSolved;
+    }
+
+    // Method 3: Extract from profile stats
+    extractFromProfileStats(document) {
+        try {
+            // Look for problems solved in rating container or stats section
+            const containers = document.querySelectorAll('.rating-container, .user-stats, .profile-stats, .contest-stats');
+            
+            for (let container of containers) {
+                const numbers = container.textContent.match(/\b(\d{2,4})\b/g);
+                if (numbers) {
+                    // Look for numbers that might represent problems solved (typically 100+)
+                    for (let number of numbers) {
+                        const num = parseInt(number);
+                        if (num >= 50 && num <= 10000) { // Reasonable range for problems solved
+                            return num;
+                        }
+                    }
+                }
+            }
+
+            // Try alternative selectors
+            const altSelectors = ['.rating-data-section h3', '.problem-solved-count', '.total-solved'];
+            for (let selector of altSelectors) {
+                const element = document.querySelector(selector);
+                if (element) {
+                    const match = element.textContent.match(/(\d+)/);
+                    if (match) {
+                        return parseInt(match[1]);
+                    }
+                }
+            }
+
+        } catch (e) {
+            console.log('Method 3 failed:', e.message);
+        }
+        return 0;
+    }
+
     getDivisionFromRating(rating) {
         if (rating >= 2200) return "Division 1";
         if (rating >= 1800) return "Division 2";
@@ -563,6 +632,7 @@ class CodeChefAPI {
         return "Unrated";
     }
 }
+
 
 class GeeksForGeeksAPI {
     constructor() {
@@ -1460,29 +1530,31 @@ function extractPlatformStats(platform, data) {
             };
         
         case 'codeforces':
-            return {
-                username: data.username,
-                current_rating: data.detailed_stats?.current_rating || 0,
-                max_rating: data.detailed_stats?.max_rating || 0,
-                rank: data.detailed_stats?.rank || "unrated",
-                contests_participated: data.detailed_stats?.contests_participated || 0,
-                problems_solved: data.detailed_stats?.problems_solved || 0,
-                acceptance_rate: data.detailed_stats?.acceptance_rate || 0,
-                difficulty_distribution: data.detailed_stats?.difficulty_distribution || {},
-                recent_contests: data.detailed_stats?.recent_contests || []
-            };
-        
-        case 'codechef':
-            return {
-                username: data.username,
-                current_rating: data.detailed_stats?.current_rating || 0,
-                highest_rating: data.detailed_stats?.highest_rating || 0,
-                problems_solved: data.detailed_stats?.problems_solved || 0,
-                contests_attended: data.detailed_stats?.contests_attended || 0,
-                global_rank: data.detailed_stats?.global_rank || 0,
-                country_rank: data.detailed_stats?.country_rank || 0,
-                stars: data.detailed_stats?.stars || "unrated"
-            };
+    return {
+        username: data.username,
+        current_rating: data.detailed_stats?.current_rating || 0,
+        max_rating: data.detailed_stats?.max_rating || 0,
+        rank: data.detailed_stats?.rank || "unrated",
+        max_rank: data.detailed_stats?.max_rank || "unrated",
+        contests_participated: data.detailed_stats?.contests_participated || 0,
+        problems_solved: data.detailed_stats?.problems_solved || 0,
+        acceptance_rate: data.detailed_stats?.acceptance_rate || 0,
+        total_submissions: data.detailed_stats?.total_submissions || 0,
+        contribution: data.detailed_stats?.contribution || 0
+    };
+
+case 'codechef':
+    return {
+        username: data.username,
+        current_rating: data.detailed_stats?.current_rating || 0,
+        highest_rating: data.detailed_stats?.highest_rating || 0,
+        problems_solved: data.detailed_stats?.problems_solved || 0,
+        contests_attended: data.detailed_stats?.contests_attended || 0,
+        global_rank: data.detailed_stats?.global_rank || 0,
+        country_rank: data.detailed_stats?.country_rank || 0,
+        stars: data.detailed_stats?.stars || "unrated",
+        division: data.detailed_stats?.division || "Unrated"
+    };
         
         case 'geeksforgeeks':
             return {
