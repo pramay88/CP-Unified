@@ -387,7 +387,7 @@ class CodeForcesAPI {
 
 class CodeChefAPI {
     constructor() {
-        this.timeout = 15000; // Increased timeout
+        this.timeout = 15000;
     }
 
     async getUserData(handle) {
@@ -397,10 +397,16 @@ class CodeChefAPI {
             const response = await axios.get(`https://www.codechef.com/users/${handle}`, {
                 timeout: this.timeout,
                 headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.9',
-                    'Cache-Control': 'no-cache'
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Upgrade-Insecure-Requests': '1'
                 }
             });
 
@@ -409,18 +415,8 @@ class CodeChefAPI {
                 const dom = new JSDOM(htmlData);
                 const document = dom.window.document;
 
-                // Method 1: Try to extract from problems solved section
-                let totalProblemsSolved = this.extractProblemsFromSection(document, htmlData);
-
-                // Method 2: If not found, try heatmap data (fallback)
-                if (totalProblemsSolved === 0) {
-                    totalProblemsSolved = this.extractProblemsFromHeatmap(htmlData);
-                }
-
-                // Method 3: Try to extract from profile stats section
-                if (totalProblemsSolved === 0) {
-                    totalProblemsSolved = this.extractFromProfileStats(document);
-                }
+                // Extract problems solved using multiple methods
+                const problemsSolved = this.extractProblemsSolved(document, htmlData);
 
                 // Extract rating data
                 let ratingData = null;
@@ -446,7 +442,7 @@ class CodeChefAPI {
                 const userCountryName = document.querySelector(".user-country-name");
                 const ratingElement = document.querySelector(".rating");
 
-                const currentRating = parseInt(ratingNumber?.textContent) || 0;
+                const currentRating = parseInt(ratingNumber?.textContent?.replace(/[^\d]/g, '')) || 0;
                 if (highestRating === 0) {
                     highestRating = currentRating;
                 }
@@ -456,8 +452,8 @@ class CodeChefAPI {
                     platform: "codechef",
                     username: handle,
                     profile: {
-                        name: userDetailsContainer?.children[0]?.children[1]?.textContent?.trim() || handle,
-                        avatar: userDetailsContainer?.children[0]?.children[0]?.src || null,
+                        name: this.extractName(userDetailsContainer) || handle,
+                        avatar: userDetailsContainer?.querySelector('img')?.src || null,
                         countryFlag: userCountryFlag?.src || null,
                         countryName: userCountryName?.textContent?.trim() || null,
                         username: handle
@@ -465,10 +461,10 @@ class CodeChefAPI {
                     detailed_stats: {
                         current_rating: currentRating,
                         highest_rating: highestRating,
-                        problems_solved: totalProblemsSolved,
+                        problems_solved: problemsSolved,
                         contests_attended: ratingData ? ratingData.length : 0,
-                        global_rank: parseInt(ratingRanks?.children[0]?.children[0]?.children[0]?.children[0]?.innerHTML) || 0,
-                        country_rank: parseInt(ratingRanks?.children[0]?.children[1]?.children[0]?.children[0]?.innerHTML) || 0,
+                        global_rank: this.extractRank(ratingRanks, 'global') || 0,
+                        country_rank: this.extractRank(ratingRanks, 'country') || 0,
                         stars: ratingElement?.textContent?.trim() || "unrated",
                         division: this.getDivisionFromRating(currentRating)
                     }
@@ -504,122 +500,260 @@ class CodeChefAPI {
         }
     }
 
-    // Method 1: Extract from problems solved section
-    extractProblemsFromSection(document, htmlData) {
+    extractProblemsSolved(document, htmlData) {
+        console.log('Extracting problems solved using multiple methods...');
+        
+        // Method 1: Look for problems solved in the page data/JavaScript
+        let problemsSolved = this.extractFromPageData(htmlData);
+        if (problemsSolved > 0) {
+            console.log(`Method 1 (Page Data): Found ${problemsSolved} problems`);
+            return problemsSolved;
+        }
+
+        // Method 2: Extract from heatmap data (improved parsing)
+        problemsSolved = this.extractFromHeatmap(htmlData);
+        if (problemsSolved > 0) {
+            console.log(`Method 2 (Heatmap): Found ${problemsSolved} problems`);
+            return problemsSolved;
+        }
+
+        // Method 3: Look in profile sections
+        problemsSolved = this.extractFromProfileSections(document);
+        if (problemsSolved > 0) {
+            console.log(`Method 3 (Profile Sections): Found ${problemsSolved} problems`);
+            return problemsSolved;
+        }
+
+        // Method 4: Look for specific selectors
+        problemsSolved = this.extractFromSelectors(document);
+        if (problemsSolved > 0) {
+            console.log(`Method 4 (Selectors): Found ${problemsSolved} problems`);
+            return problemsSolved;
+        }
+
+        console.log('All methods failed to extract problems solved count');
+        return 0;
+    }
+
+    extractFromPageData(htmlData) {
         try {
-            // Look for problems solved in various places
-            const problemsSolvedElements = document.querySelectorAll('.problems-solved, .rating-number, .rating-data-section');
-            
-            for (let element of problemsSolvedElements) {
-                const text = element.textContent;
-                if (text && text.includes('Problems Solved')) {
-                    const match = text.match(/(\d+)/);
-                    if (match) {
-                        return parseInt(match[1]);
+            // Look for total problems solved in JavaScript variables
+            const patterns = [
+                /total[_\s]*problems[_\s]*solved["\s]*:\s*(\d+)/gi,
+                /problems[_\s]*solved["\s]*:\s*(\d+)/gi,
+                /solved[_\s]*problems["\s]*:\s*(\d+)/gi,
+                /"solved":\s*(\d+)/gi,
+                /"totalSolved":\s*(\d+)/gi,
+                /var\s+totalSolved\s*=\s*(\d+)/gi
+            ];
+
+            for (let pattern of patterns) {
+                const matches = [...htmlData.matchAll(pattern)];
+                for (let match of matches) {
+                    const count = parseInt(match[1]);
+                    if (count > 10 && count < 10000) { // Reasonable range
+                        return count;
                     }
                 }
             }
-
-            // Try to find in script tags or data attributes
-            const scriptMatch = htmlData.match(/problems[_\s]*solved["\s]*:\s*(\d+)/i);
-            if (scriptMatch) {
-                return parseInt(scriptMatch[1]);
-            }
-
-            // Look for total problems in user stats
-            const statsMatch = htmlData.match(/"total[_\s]*problems[_\s]*solved"[:\s]*(\d+)/i);
-            if (statsMatch) {
-                return parseInt(statsMatch[1]);
-            }
-
         } catch (e) {
-            console.log('Method 1 failed:', e.message);
+            console.log('extractFromPageData failed:', e.message);
         }
         return 0;
     }
 
-    // Method 2: Extract from heatmap (improved)
-    extractProblemsFromHeatmap(htmlData) {
-        let totalProblemsSolved = 0;
+    extractFromHeatmap(htmlData) {
         try {
-            // Try multiple heatmap variable names
+            // Multiple heatmap patterns
             const heatmapPatterns = [
-                "var userDailySubmissionsStats =",
-                "userDailySubmissionsStats =",
-                "var heatmapData =",
-                "heatmapData =",
-                "dailySubmissions ="
+                { start: "var userDailySubmissionsStats =", end: ";", offset: 0 },
+                { start: "userDailySubmissionsStats =", end: ";", offset: 0 },
+                { start: "'#js-heatmap'", end: "'", offset: -50 }
             ];
 
             for (let pattern of heatmapPatterns) {
-                const heatMapStart = htmlData.search(pattern);
-                if (heatMapStart > -1) {
-                    const dataStart = heatMapStart + pattern.length;
-                    let dataEnd = htmlData.indexOf(';', dataStart);
-                    if (dataEnd === -1) dataEnd = htmlData.indexOf('\n', dataStart);
-                    if (dataEnd === -1) continue;
+                const startIndex = htmlData.indexOf(pattern.start);
+                if (startIndex > -1) {
+                    const dataStart = startIndex + pattern.start.length + pattern.offset;
+                    let dataEnd = htmlData.indexOf(pattern.end, dataStart);
+                    if (dataEnd === -1) dataEnd = dataStart + 5000; // Reasonable limit
 
                     try {
-                        const heatDataString = htmlData.substring(dataStart, dataEnd).trim();
-                        const heatMapData = JSON.parse(heatDataString);
+                        const dataString = htmlData.substring(dataStart, dataEnd).trim();
                         
-                        if (typeof heatMapData === 'object') {
+                        // Try to find JSON in the string
+                        const jsonMatch = dataString.match(/\{[\s\S]*\}/);
+                        if (jsonMatch) {
+                            const heatMapData = JSON.parse(jsonMatch[0]);
+                            let total = 0;
+                            
                             Object.values(heatMapData).forEach(dayData => {
-                                if (typeof dayData === 'object' && dayData.value) {
-                                    totalProblemsSolved += parseInt(dayData.value) || 0;
-                                } else if (typeof dayData === 'object' && dayData.solved) {
-                                    totalProblemsSolved += parseInt(dayData.solved) || 0;
+                                if (typeof dayData === 'object') {
+                                    if (dayData.value) total += parseInt(dayData.value) || 0;
+                                    if (dayData.solved) total += parseInt(dayData.solved) || 0;
+                                    if (dayData.count) total += parseInt(dayData.count) || 0;
                                 } else if (typeof dayData === 'number') {
-                                    totalProblemsSolved += dayData;
+                                    total += dayData;
                                 }
                             });
+                            
+                            if (total > 0) return total;
                         }
-                        
-                        if (totalProblemsSolved > 0) break;
                     } catch (e) {
                         continue;
                     }
                 }
             }
         } catch (e) {
-            console.log('Method 2 failed:', e.message);
+            console.log('extractFromHeatmap failed:', e.message);
         }
-        return totalProblemsSolved;
+        return 0;
     }
 
-    // Method 3: Extract from profile stats
-    extractFromProfileStats(document) {
+    extractFromProfileSections(document) {
         try {
-            // Look for problems solved in rating container or stats section
-            const containers = document.querySelectorAll('.rating-container, .user-stats, .profile-stats, .contest-stats');
-            
-            for (let container of containers) {
-                const numbers = container.textContent.match(/\b(\d{2,4})\b/g);
-                if (numbers) {
-                    // Look for numbers that might represent problems solved (typically 100+)
-                    for (let number of numbers) {
-                        const num = parseInt(number);
-                        if (num >= 50 && num <= 10000) { // Reasonable range for problems solved
-                            return num;
+            // Look in various profile sections
+            const selectors = [
+                '.rating-data-section',
+                '.user-details-container',
+                '.rating-container', 
+                '.profile-stats',
+                '.user-stats',
+                '.contest-stats',
+                '.rating-number-container'
+            ];
+
+            for (let selector of selectors) {
+                const elements = document.querySelectorAll(selector);
+                for (let element of elements) {
+                    const text = element.textContent || '';
+                    
+                    // Look for patterns like "136 Problems Solved" or similar
+                    const patterns = [
+                        /(\d{2,4})\s*problems?\s*solved/gi,
+                        /solved[:\s]*(\d{2,4})/gi,
+                        /problems?[:\s]*(\d{2,4})/gi
+                    ];
+                    
+                    for (let pattern of patterns) {
+                        const match = text.match(pattern);
+                        if (match) {
+                            const count = parseInt(match[1]);
+                            if (count > 10 && count < 10000) {
+                                return count;
+                            }
+                        }
+                    }
+
+                    // Look for standalone numbers in reasonable range
+                    const numbers = text.match(/\b(\d{2,4})\b/g);
+                    if (numbers) {
+                        for (let number of numbers) {
+                            const num = parseInt(number);
+                            if (num >= 50 && num <= 5000) {
+                                // Additional validation - check if it's likely to be problems solved
+                                const context = element.innerHTML.toLowerCase();
+                                if (context.includes('problem') || context.includes('solved') || 
+                                    context.includes('total') || context.includes('count')) {
+                                    return num;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.log('extractFromProfileSections failed:', e.message);
+        }
+        return 0;
+    }
+
+    extractFromSelectors(document) {
+        try {
+            // Specific selectors that might contain problems solved
+            const specificSelectors = [
+                '.problem-solved-count',
+                '.total-solved',
+                '.problems-count',
+                '[data-problems-solved]',
+                '.rating-number:not(.rating-number)',
+                'h3:contains("Problems")',
+                'span:contains("Solved")'
+            ];
+
+            for (let selector of specificSelectors) {
+                const element = document.querySelector(selector);
+                if (element) {
+                    const text = element.textContent || element.getAttribute('data-problems-solved') || '';
+                    const match = text.match(/(\d+)/);
+                    if (match) {
+                        const count = parseInt(match[1]);
+                        if (count > 10 && count < 10000) {
+                            return count;
                         }
                     }
                 }
             }
 
-            // Try alternative selectors
-            const altSelectors = ['.rating-data-section h3', '.problem-solved-count', '.total-solved'];
-            for (let selector of altSelectors) {
-                const element = document.querySelector(selector);
-                if (element) {
-                    const match = element.textContent.match(/(\d+)/);
-                    if (match) {
+            // Try data attributes
+            const elementsWithData = document.querySelectorAll('[data-*]');
+            for (let element of elementsWithData) {
+                const attributes = element.attributes;
+                for (let attr of attributes) {
+                    if (attr.name.includes('problem') || attr.name.includes('solved')) {
+                        const count = parseInt(attr.value);
+                        if (count > 10 && count < 10000) {
+                            return count;
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.log('extractFromSelectors failed:', e.message);
+        }
+        return 0;
+    }
+
+    extractName(userDetailsContainer) {
+        try {
+            if (userDetailsContainer) {
+                // Try different selectors for name
+                const nameElement = userDetailsContainer.querySelector('.user-name, .username, h1, h2, .name');
+                if (nameElement) {
+                    return nameElement.textContent.trim();
+                }
+                
+                // Try getting from child elements
+                const textElements = userDetailsContainer.querySelectorAll('*');
+                for (let element of textElements) {
+                    const text = element.textContent.trim();
+                    if (text && text.length > 2 && text.length < 50 && !text.match(/^\d+$/) && !text.includes('@')) {
+                        return text;
+                    }
+                }
+            }
+        } catch (e) {
+            console.log('extractName failed:', e.message);
+        }
+        return null;
+    }
+
+    extractRank(ratingRanks, type) {
+        try {
+            if (ratingRanks) {
+                const rankElements = ratingRanks.querySelectorAll('*');
+                let rankIndex = type === 'global' ? 0 : 1;
+                
+                for (let element of rankElements) {
+                    const text = element.textContent;
+                    const match = text.match(/(\d+)/);
+                    if (match && rankIndex-- === 0) {
                         return parseInt(match[1]);
                     }
                 }
             }
-
         } catch (e) {
-            console.log('Method 3 failed:', e.message);
+            console.log('extractRank failed:', e.message);
         }
         return 0;
     }
@@ -632,6 +766,7 @@ class CodeChefAPI {
         return "Unrated";
     }
 }
+
 
 
 class GeeksForGeeksAPI {
