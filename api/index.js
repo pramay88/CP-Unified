@@ -566,22 +566,47 @@ class CodeChefAPI {
 
 class GeeksForGeeksAPI {
     constructor() {
-        this.baseURL = 'https://geeks-for-geeks-api.vercel.app';
-        this.timeout = 8000;
+        this.primaryURL = 'https://gfg-api.vercel.app';
+        this.fallbackURL = 'https://geeksforgeeks-api-fzaa.onrender.com';
+        this.statsURL = 'https://geeks-for-geeks-stats-api.vercel.app';
+        this.timeout = 15000;
     }
 
     async getUserData(username) {
         try {
-            const response = await axios.get(`${this.baseURL}/${username}`, { 
-                timeout: this.timeout,
-                headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
-            });
+            console.log(`Fetching GeeksforGeeks data for: ${username}`);
+            
+            // Try multiple APIs in sequence
+            let userData = await this.fetchFromPrimaryAPI(username);
+            
+            if (!userData || userData.problems_solved === 0) {
+                userData = await this.fetchFromStatsAPI(username);
+            }
+            
+            if (!userData || userData.problems_solved === 0) {
+                userData = await this.fetchFromFallbackAPI(username);
+            }
+            
             return {
                 status: "OK",
                 platform: "geeksforgeeks",
                 username: username,
-                data: response.data,
-                detailed_stats: this.calculateDetailedStats(response.data)
+                data: userData,
+                detailed_stats: {
+                    problems_solved: userData?.problems_solved || userData?.totalProblemsSolved || 0,
+                    overall_score: userData?.overall_score || userData?.overallScore || 0,
+                    monthly_score: userData?.monthly_score || userData?.monthlyScore || 0,
+                    institute_rank: userData?.institute_rank || userData?.instituteRank || 0,
+                    current_streak: userData?.current_streak || userData?.currentStreak || 0,
+                    max_streak: userData?.max_streak || userData?.maxStreak || 0,
+                    coding_languages: userData?.coding_languages || userData?.languagesUsed || [],
+                    articles_published: userData?.articles_published || userData?.articlesPublished || 0,
+                    school_solved: userData?.School || 0,
+                    basic_solved: userData?.Basic || 0,
+                    easy_solved: userData?.Easy || 0,
+                    medium_solved: userData?.Medium || 0,
+                    hard_solved: userData?.Hard || 0
+                }
             };
         } catch (error) {
             console.error(`GeeksForGeeks API Error for ${username}:`, error.message);
@@ -594,17 +619,67 @@ class GeeksForGeeksAPI {
         }
     }
 
-    calculateDetailedStats(data) {
-        return {
-            problems_solved: data?.totalProblemsSolved || 0,
-            overall_score: data?.overallScore || 0,
-            monthly_score: data?.monthlyScore || 0,
-            institute_rank: data?.instituteRank || 0,
-            current_streak: data?.currentStreak || 0,
-            max_streak: data?.maxStreak || 0,
-            coding_languages: data?.languagesUsed || [],
-            articles_published: data?.articlesPublished || 0
-        };
+    async fetchFromPrimaryAPI(username) {
+        try {
+            const response = await axios.get(`${this.primaryURL}/${username}`, {
+                timeout: this.timeout,
+                headers: { 
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json'
+                }
+            });
+            return response.data;
+        } catch (error) {
+            console.log(`Primary GFG API failed: ${error.message}`);
+            return null;
+        }
+    }
+
+    async fetchFromStatsAPI(username) {
+        try {
+            const response = await axios.get(`${this.statsURL}/?raw=y&userName=${username}`, {
+                timeout: this.timeout,
+                headers: { 
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json'
+                }
+            });
+            
+            const data = response.data;
+            return {
+                problems_solved: parseInt(data.totalProblemsSolved) || 0,
+                School: parseInt(data.School) || 0,
+                Basic: parseInt(data.Basic) || 0,
+                Easy: parseInt(data.Easy) || 0,
+                Medium: parseInt(data.Medium) || 0,
+                Hard: parseInt(data.Hard) || 0,
+                overall_score: 0,
+                monthly_score: 0,
+                institute_rank: 0,
+                current_streak: 0,
+                max_streak: 0,
+                coding_languages: [],
+                articles_published: 0
+            };
+        } catch (error) {
+            console.log(`Stats GFG API failed: ${error.message}`);
+            return null;
+        }
+    }
+
+    async fetchFromFallbackAPI(username) {
+        try {
+            const response = await axios.get(`${this.fallbackURL}/${username}`, {
+                timeout: this.timeout,
+                headers: { 
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            });
+            return response.data;
+        } catch (error) {
+            console.log(`Fallback GFG API failed: ${error.message}`);
+            return null;
+        }
     }
 }
 
