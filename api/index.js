@@ -852,16 +852,519 @@ class AtCoderAPI {
 }
 
 class HackerRankAPI {
+    constructor() {
+        this.baseURL = 'https://www.hackerrank.com/rest/hackers';
+        this.profileURL = 'https://www.hackerrank.com/rest/hackers';
+        this.contestURL = 'https://www.hackerrank.com/rest/contests/master/hackers';
+        this.timeout = 15000;
+    }
+
     async getUserData(username) {
+        try {
+            console.log(`Fetching HackerRank data for: ${username}`);
+            
+            // Try all available HackerRank API endpoints
+            const [profileData, badgesData, scoresEloData, contestProfileData] = await Promise.allSettled([
+                this.fetchProfile(username),
+                this.fetchBadges(username),
+                this.fetchScoresElo(username),
+                this.fetchContestProfile(username)
+            ]);
+
+            const profile = profileData.status === 'fulfilled' ? profileData.value : null;
+            const badges = badgesData.status === 'fulfilled' ? badgesData.value : null;
+            const scoresElo = scoresEloData.status === 'fulfilled' ? scoresEloData.value : null;
+            const contestProfile = contestProfileData.status === 'fulfilled' ? contestProfileData.value : null;
+
+            if (!profile && !badges && !scoresElo && !contestProfile) {
+                throw new Error("All HackerRank data sources failed");
+            }
+
+            // Process all data sources
+            const badgeStats = this.processBadgesData(badges);
+            const profileStats = this.processProfileData(profile);
+            const eloStats = this.processScoresEloData(scoresElo);
+            const contestStats = this.processContestProfileData(contestProfile);
+
+            return {
+                status: "OK",
+                platform: "hackerrank",
+                username: username,
+                profile: {
+                    name: profileStats.name || contestStats.name || username,
+                    username: username,
+                    avatar: profileStats.avatar || contestStats.avatar || `https://www.hackerrank.com/rest/hackers/${username}/avatar`,
+                    country: profileStats.country || contestStats.country || null,
+                    school: profileStats.school || contestStats.school || null,
+                    company: profileStats.company || contestStats.company || null,
+                    website: profileStats.website || null,
+                    linkedin: profileStats.linkedin || null,
+                    github: profileStats.github || null,
+                    created_at: profileStats.created_at || contestStats.created_at || null,
+                    bio: profileStats.bio || null,
+                    location: profileStats.location || null,
+                    title: contestStats.title || null
+                },
+                detailed_stats: {
+                    // Core Statistics
+                    rank: profileStats.rank || 0,
+                    level: profileStats.level || contestStats.level || badgeStats.highest_level || 1,
+                    hackos: profileStats.hackos || 0,
+                    
+                    // Social Statistics  
+                    followers: profileStats.followers || contestStats.followers || 0,
+                    following: profileStats.following || 0,
+                    event_count: contestStats.event_count || 0,
+                    
+                    // Badge Information
+                    badges: badgeStats.badges,
+                    total_badges: badgeStats.total_badges,
+                    badge_categories: badgeStats.categories,
+                    
+                    // Language and Domain Statistics from ELO data
+                    domain_scores: eloStats.domain_scores,
+                    language_proficiency: eloStats.language_proficiency,
+                    practice_ranks: eloStats.practice_ranks,
+                    contest_performance: eloStats.contest_performance,
+                    
+                    // Problem Solving Statistics (from badges + ELO)
+                    problems_solved: badgeStats.total_solved,
+                    challenges_completed: badgeStats.total_challenges_solved,
+                    total_points: Math.max(badgeStats.total_points, eloStats.total_practice_score),
+                    total_stars: badgeStats.total_stars,
+                    
+                    // Specialized Domain Performance
+                    algorithms_score: eloStats.algorithms_score || 0,
+                    data_structures_score: eloStats.data_structures_score || 0,
+                    mathematics_score: eloStats.mathematics_score || 0,
+                    sql_score: eloStats.sql_score || 0,
+                    python_score: eloStats.python_score || 0,
+                    java_score: eloStats.java_score || 0,
+                    cpp_score: eloStats.cpp_score || 0,
+                    tutorials_score: eloStats.tutorials_score || 0,
+                    
+                    // Rankings by Domain
+                    algorithms_rank: eloStats.algorithms_rank || 0,
+                    data_structures_rank: eloStats.data_structures_rank || 0,
+                    python_rank: eloStats.python_rank || 0,
+                    java_rank: eloStats.java_rank || 0,
+                    cpp_rank: eloStats.cpp_rank || 0,
+                    sql_rank: eloStats.sql_rank || 0,
+                    
+                    // Contest Performance Summary
+                    contest_medals: eloStats.total_medals,
+                    contest_participation_summary: eloStats.contest_summary,
+                    
+                    // Achievement Summary for CodeFolio
+                    achievement_summary: {
+                        total_badges: badgeStats.total_badges,
+                        total_stars: badgeStats.total_stars,
+                        total_problems_solved: badgeStats.total_solved,
+                        languages_practiced: Object.keys(eloStats.language_proficiency).length,
+                        domains_practiced: Object.keys(eloStats.domain_scores).length,
+                        total_practice_score: eloStats.total_practice_score,
+                        best_domain: eloStats.best_performing_domain,
+                        contest_participation: eloStats.total_contest_participation
+                    },
+                    
+                    // Portfolio Metrics
+                    overall_progress: this.calculateOverallProgress(eloStats, badgeStats),
+                    star_rating: this.calculateOverallStarRating(badgeStats.badges),
+                    activity_level: this.determineActivityLevel(badgeStats.total_solved, badgeStats.total_badges),
+                    strongest_domains: this.getStrongestDomains(eloStats.domain_scores),
+                    language_expertise: this.getLanguageExpertise(eloStats.language_proficiency),
+                    
+                    // Comprehensive Statistics
+                    comprehensive_stats: {
+                        profile_completeness: this.calculateProfileCompleteness(profileStats, contestStats),
+                        skill_diversity: Object.keys(eloStats.domain_scores).filter(domain => 
+                            eloStats.domain_scores[domain].score > 0).length,
+                        contest_consistency: eloStats.contest_consistency || 0
+                    }
+                }
+            };
+        } catch (error) {
+            console.error(`HackerRank API Error for ${username}:`, error.message);
+            return {
+                status: "FAILED",
+                platform: "hackerrank",
+                username: username,
+                error: `HackerRank profile not accessible: ${error.message}`,
+                suggestion: "User might not exist or profile is private"
+            };
+        }
+    }
+
+    async fetchProfile(username) {
+        try {
+            const response = await axios.get(`${this.profileURL}/${username}`, {
+                timeout: this.timeout,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': 'application/json',
+                    'Referer': 'https://www.hackerrank.com/',
+                    'Accept-Language': 'en-US,en;q=0.9'
+                }
+            });
+            return response.data.model;
+        } catch (error) {
+            console.log(`HackerRank profile fetch failed: ${error.message}`);
+            return null;
+        }
+    }
+
+    async fetchBadges(username) {
+        try {
+            const response = await axios.get(`${this.baseURL}/${username}/badges`, {
+                timeout: this.timeout,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': 'application/json',
+                    'Referer': 'https://www.hackerrank.com/',
+                    'Accept-Language': 'en-US,en;q=0.9'
+                }
+            });
+            return response.data;
+        } catch (error) {
+            console.log(`HackerRank badges fetch failed: ${error.message}`);
+            return null;
+        }
+    }
+
+    // NEW: Fetch scores_elo data
+    async fetchScoresElo(username) {
+        try {
+            const response = await axios.get(`${this.baseURL}/${username}/scores_elo`, {
+                timeout: this.timeout,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': 'application/json',
+                    'Referer': 'https://www.hackerrank.com/',
+                    'Accept-Language': 'en-US,en;q=0.9'
+                }
+            });
+            return response.data;
+        } catch (error) {
+            console.log(`HackerRank scores_elo fetch failed: ${error.message}`);
+            return null;
+        }
+    }
+
+    // NEW: Fetch contest profile data
+    async fetchContestProfile(username) {
+        try {
+            const response = await axios.get(`${this.contestURL}/${username}/profile`, {
+                timeout: this.timeout,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': 'application/json',
+                    'Referer': 'https://www.hackerrank.com/',
+                    'Accept-Language': 'en-US,en;q=0.9'
+                }
+            });
+            return response.data.model;
+        } catch (error) {
+            console.log(`HackerRank contest profile fetch failed: ${error.message}`);
+            return null;
+        }
+    }
+
+    // NEW: Process scores_elo data
+    processScoresEloData(scoresEloData) {
+        if (!scoresEloData || !Array.isArray(scoresEloData)) {
+            return this.getEmptyEloStats();
+        }
+
+        const stats = {
+            domain_scores: {},
+            language_proficiency: {},
+            practice_ranks: {},
+            contest_performance: {},
+            total_practice_score: 0,
+            total_medals: { gold: 0, silver: 0, bronze: 0 },
+            contest_summary: {},
+            best_performing_domain: null,
+            total_contest_participation: 0,
+            contest_consistency: 0
+        };
+
+        // Map specific domains for easy access
+        const domainMap = {
+            'Algorithms': 'algorithms',
+            'Data Structures': 'data_structures', 
+            'Mathematics': 'mathematics',
+            'SQL': 'sql',
+            'Python': 'python',
+            'Java': 'java',
+            'C++': 'cpp',
+            'Tutorials': 'tutorials',
+            'Artificial Intelligence': 'artificial_intelligence',
+            'Databases': 'databases',
+            'Functional Programming': 'functional_programming',
+            'Linux Shell': 'shell',
+            'Ruby': 'ruby',
+            'C': 'c',
+            'React': 'react',
+            'Regex': 'regex',
+            'Security': 'security',
+            'Distributed Systems': 'distributed_systems',
+            'General Programming': 'general_programming'
+        };
+
+        scoresEloData.forEach(domain => {
+            const domainName = domain.name;
+            const domainKey = domainMap[domainName] || domainName.toLowerCase().replace(/\s+/g, '_');
+
+            // Practice scores and ranks
+            const practiceScore = domain.practice?.score || 0;
+            const practiceRank = domain.practice?.rank || 0;
+
+            // Contest performance
+            const contestScore = domain.contest?.score || 0;
+            const contestRank = domain.contest?.rank || 'N/A';
+            const contestLevel = domain.contest?.level || 5;
+            const medals = domain.contest?.medals || { gold: 0, silver: 0, bronze: 0 };
+
+            stats.domain_scores[domainKey] = {
+                name: domainName,
+                practice_score: practiceScore,
+                practice_rank: practiceRank,
+                contest_score: contestScore,
+                contest_rank: contestRank,
+                contest_level: contestLevel,
+                medals: medals,
+                track_id: domain.track_id
+            };
+
+            // Add to totals
+            stats.total_practice_score += practiceScore;
+            if (medals) {
+                stats.total_medals.gold += medals.gold || 0;
+                stats.total_medals.silver += medals.silver || 0;
+                stats.total_medals.bronze += medals.bronze || 0;
+            }
+
+            // Track language proficiency specifically
+            if (['python', 'java', 'cpp', 'c', 'ruby', 'react'].includes(domainKey)) {
+                stats.language_proficiency[domainKey] = {
+                    score: practiceScore,
+                    rank: practiceRank,
+                    contest_performance: {
+                        score: contestScore,
+                        level: contestLevel,
+                        medals: medals
+                    }
+                };
+            }
+
+            // Set individual domain scores for easy access
+            stats[`${domainKey}_score`] = practiceScore;
+            stats[`${domainKey}_rank`] = practiceRank;
+        });
+
+        // Find best performing domain
+        let bestScore = 0;
+        let bestDomain = null;
+        Object.entries(stats.domain_scores).forEach(([key, data]) => {
+            if (data.practice_score > bestScore) {
+                bestScore = data.practice_score;
+                bestDomain = data.name;
+            }
+        });
+        stats.best_performing_domain = bestDomain;
+
+        // Calculate contest participation
+        stats.total_contest_participation = scoresEloData.filter(d => 
+            d.contest && (d.contest.score > 0 || (d.contest.medals && 
+            (d.contest.medals.gold > 0 || d.contest.medals.silver > 0 || d.contest.medals.bronze > 0)))
+        ).length;
+
+        return stats;
+    }
+
+    processContestProfileData(contestProfile) {
+        if (!contestProfile) {
+            return {};
+        }
+
         return {
-            status: "NOT_AVAILABLE",
-            platform: "hackerrank",
-            username: username,
-            comment: "HackerRank requires private API access or web scraping",
-            detailed_stats: {}
+            name: contestProfile.personal_first_name && contestProfile.personal_last_name ? 
+                  `${contestProfile.personal_first_name} ${contestProfile.personal_last_name}` : null,
+            avatar: contestProfile.avatar,
+            country: contestProfile.country,
+            school: contestProfile.school,
+            company: contestProfile.company,
+            created_at: contestProfile.created_at,
+            level: contestProfile.level,
+            followers: contestProfile.followers_count,
+            event_count: contestProfile.event_count,
+            title: contestProfile.title
         };
     }
+
+    processBadgesData(badgesResponse) {
+        if (!badgesResponse || !badgesResponse.models) {
+            return this.getEmptyBadgeStats();
+        }
+
+        const badges = badgesResponse.models;
+        const stats = {
+            badges: [],
+            total_badges: badges.length,
+            categories: {},
+            total_solved: 0,
+            total_challenges_solved: 0,
+            total_points: 0,
+            total_stars: 0,
+            highest_level: 0
+        };
+
+        badges.forEach(badge => {
+            const processedBadge = {
+                name: badge.badge_name,
+                short_name: badge.badge_short_name,
+                category: badge.category_name,
+                badge_type: badge.badge_type,
+                stars: badge.stars,
+                level: badge.level,
+                current_points: badge.current_points,
+                solved: badge.solved,
+                total_challenges: badge.total_challenges
+            };
+
+            stats.badges.push(processedBadge);
+            stats.total_solved += badge.solved || 0;
+            stats.total_points += badge.current_points || 0;
+            stats.total_stars += badge.stars || 0;
+            stats.highest_level = Math.max(stats.highest_level, badge.level || 0);
+
+            const category = badge.category_name || 'Other';
+            if (!stats.categories[category]) {
+                stats.categories[category] = [];
+            }
+            stats.categories[category].push(processedBadge);
+        });
+
+        return stats;
+    }
+
+    processProfileData(profile) {
+        if (!profile) {
+            return {};
+        }
+
+        return {
+            name: profile.personal_first_name && profile.personal_last_name ? 
+                  `${profile.personal_first_name} ${profile.personal_last_name}` : null,
+            avatar: profile.avatar,
+            country: profile.country,
+            school: profile.school,
+            company: profile.company,
+            website: profile.website,
+            linkedin: profile.linkedin_url,
+            github: profile.github_url,
+            created_at: profile.created_at,
+            bio: profile.short_bio,
+            location: profile.location,
+            rank: profile.rank,
+            level: profile.level,
+            hackos: profile.hackos,
+            followers: profile.followers_count,
+            following: profile.following_count
+        };
+    }
+
+    getEmptyEloStats() {
+        return {
+            domain_scores: {},
+            language_proficiency: {},
+            practice_ranks: {},
+            contest_performance: {},
+            total_practice_score: 0,
+            total_medals: { gold: 0, silver: 0, bronze: 0 },
+            contest_summary: {},
+            best_performing_domain: null,
+            total_contest_participation: 0,
+            contest_consistency: 0
+        };
+    }
+
+    getEmptyBadgeStats() {
+        return {
+            badges: [],
+            total_badges: 0,
+            categories: {},
+            total_solved: 0,
+            total_challenges_solved: 0,
+            total_points: 0,
+            total_stars: 0,
+            highest_level: 0
+        };
+    }
+
+    calculateOverallProgress(eloStats, badgeStats) {
+        const practiceScore = eloStats.total_practice_score || 0;
+        const badgePoints = badgeStats.total_points || 0;
+        const totalStars = badgeStats.total_stars || 0;
+        
+        return Math.min(100, (practiceScore + badgePoints + (totalStars * 20)) / 10);
+    }
+
+    calculateOverallStarRating(badges) {
+        if (!badges || badges.length === 0) return 0;
+        
+        const totalStars = badges.reduce((sum, badge) => sum + (badge.stars || 0), 0);
+        const avgStars = totalStars / badges.length;
+        
+        return Math.round(avgStars * 10) / 10;
+    }
+
+    determineActivityLevel(totalSolved, totalBadges) {
+        if (totalSolved >= 100 && totalBadges >= 5) return 'Expert';
+        if (totalSolved >= 50 && totalBadges >= 3) return 'Advanced';
+        if (totalSolved >= 20 && totalBadges >= 2) return 'Intermediate';
+        if (totalSolved >= 5 && totalBadges >= 1) return 'Beginner';
+        return 'New';
+    }
+
+    getStrongestDomains(domainScores) {
+        return Object.entries(domainScores)
+            .sort(([,a], [,b]) => b.practice_score - a.practice_score)
+            .slice(0, 3)
+            .map(([domain, data]) => ({
+                domain: data.name,
+                score: data.practice_score,
+                rank: data.practice_rank
+            }));
+    }
+
+    getLanguageExpertise(languageProficiency) {
+        return Object.entries(languageProficiency)
+            .sort(([,a], [,b]) => b.score - a.score)
+            .map(([lang, data]) => ({
+                language: lang.toUpperCase(),
+                score: data.score,
+                rank: data.rank,
+                contest_level: data.contest_performance?.level || 5
+            }));
+    }
+
+    calculateProfileCompleteness(profileStats, contestStats) {
+        let completeness = 0;
+        const fields = ['name', 'country', 'school', 'company', 'bio', 'avatar'];
+        
+        fields.forEach(field => {
+            if (profileStats[field] || contestStats[field]) {
+                completeness += 100 / fields.length;
+            }
+        });
+        
+        return Math.round(completeness);
+    }
 }
+
+
+
 
 class InterviewBitAPI {
     async getUserData(username) {
@@ -1003,6 +1506,32 @@ function extractPlatformStats(platform, data) {
                 top_repositories: data.detailed_stats?.top_repositories || []
             };
         
+case 'hackerrank':
+    return {
+        username: data.username,
+        rank: data.detailed_stats?.rank || 0,
+        level: data.detailed_stats?.level || 0,
+        hackos: data.detailed_stats?.hackos || 0,
+        badges: data.detailed_stats?.total_badges || 0,
+        problems_solved: data.detailed_stats?.problems_solved || 0,
+        total_points: data.detailed_stats?.total_points || 0,
+        total_stars: data.detailed_stats?.total_stars || 0,
+        followers: data.detailed_stats?.followers || 0,
+        following: data.detailed_stats?.following || 0,
+        event_count: data.detailed_stats?.event_count || 0,
+        contest_medals: data.detailed_stats?.contest_medals || { gold: 0, silver: 0, bronze: 0 },
+        strongest_domain: data.detailed_stats?.achievement_summary?.best_domain || "None",
+        languages_practiced: data.detailed_stats?.achievement_summary?.languages_practiced || 0,
+        domains_practiced: data.detailed_stats?.achievement_summary?.domains_practiced || 0,
+        contest_participation: data.detailed_stats?.achievement_summary?.contest_participation || 0,
+        activity_level: data.detailed_stats?.activity_level || "New",
+        algorithms_score: data.detailed_stats?.algorithms_score || 0,
+        data_structures_score: data.detailed_stats?.data_structures_score || 0,
+        python_score: data.detailed_stats?.python_score || 0,
+        java_score: data.detailed_stats?.java_score || 0,
+        cpp_score: data.detailed_stats?.cpp_score || 0
+    };
+
         case 'atcoder':
             return {
                 username: data.username,
@@ -1049,21 +1578,76 @@ function aggregateCombinedMetrics(combined, platform, data) {
                 combined.contest_ratings.leetcode = data.detailed_stats.contest_rating;
             }
             break;
+        
+// Add this case to the switch statement in aggregateCombinedMetrics function
+case 'hackerrank':
+    // Add to programming languages from language proficiency
+    if (data.detailed_stats?.language_proficiency) {
+        Object.keys(data.detailed_stats.language_proficiency).forEach(lang => {
+            combined.programming_languages.add(lang.toUpperCase());
+        });
+    }
+    
+    // Add to total contributions (problems solved)
+    combined.total_contributions += data.detailed_stats?.problems_solved || 0;
+    
+    // Add contest ratings if available
+    if (data.detailed_stats?.algorithms_score) {
+        combined.contest_ratings.hackerrank = data.detailed_stats.algorithms_score;
+    }
+    
+    // Add followers to social metrics
+    combined.total_followers += data.detailed_stats?.followers || 0;
+    
+    // Track domain expertise
+    if (data.detailed_stats?.strongest_domains) {
+        data.detailed_stats.strongest_domains.forEach(domain => {
+            if (!combined.domain_expertise) {
+                combined.domain_expertise = {};
+            }
+            combined.domain_expertise[domain.domain] = domain.score;
+        });
+    }
+    break;
+
     }
 }
 
 function calculateTotalStats(stats) {
-    // Calculate total problems solved across platforms
+    // Reset counters
+    let totalHackos = 0;
+    let totalMedals = { gold: 0, silver: 0, bronze: 0 };
+    let totalEvents = 0;
+
     Object.values(stats.platform_breakdown).forEach(platform => {
+        // Existing logic for problems solved and contests
         if (platform.problems_solved) {
             stats.total_problems_solved += platform.problems_solved;
         }
-        if (platform.contests_attended || platform.contests_participated) {
-            stats.total_contests += (platform.contests_attended || platform.contests_participated);
+        if (platform.contests_attended || platform.contests_participated || platform.contest_participation || platform.event_count) {
+            stats.total_contests += (platform.contests_attended || platform.contests_participated || platform.contest_participation || platform.event_count || 0);
+        }
+        
+        // Add HackerRank-specific metrics
+        if (platform.hackos) {
+            totalHackos += platform.hackos;
+        }
+        if (platform.contest_medals) {
+            totalMedals.gold += platform.contest_medals.gold || 0;
+            totalMedals.silver += platform.contest_medals.silver || 0;
+            totalMedals.bronze += platform.contest_medals.bronze || 0;
+        }
+        if (platform.event_count) {
+            totalEvents += platform.event_count;
         }
     });
 
-    // Calculate weighted average rating
+    // Add new aggregate metrics
+    stats.total_hackos = totalHackos;
+    stats.total_contest_medals = totalMedals;
+    stats.total_events_participated = totalEvents;
+
+    // Calculate overall rating including HackerRank
     const ratings = Object.values(stats.combined_metrics.contest_ratings);
     if (ratings.length > 0) {
         stats.overall_rating = Math.round(ratings.reduce((a, b) => a + b, 0) / ratings.length);
@@ -1078,26 +1662,34 @@ function calculateTotalStats(stats) {
 app.get('/', (req, res) => {
     res.json({
         status: "OK",
-        message: "Multi-Platform Dashboard API - Full Featured Version",
-        version: "2.0.0",
+        message: "Multi-Platform Dashboard API - With HackerRank Integration",
+        version: "2.2.0",
         documentation: "/api/health",
+        supported_platforms: [
+            "leetcode", 
+            "codeforces", 
+            "codechef", 
+            "github", 
+            "geeksforgeeks", 
+            "atcoder", 
+            "hackerrank"
+        ],
         endpoints: {
             health: "GET /api/health",
-            aggregated_dashboard: "POST /api/dashboard/aggregated",
+            aggregated_dashboard: "POST /api/dashboard/aggregated", 
             single_user: "GET /api/dashboard/aggregated/:username",
             platform_status: "GET /api/platforms/status",
             platform_details: "GET /api/platforms/:platform/:username"
         },
-        features: [
-            "Complete profile data extraction",
-            "Detailed statistics calculation", 
-            "Cross-platform aggregation",
-            "Historical data analysis",
-            "Rate limiting and error handling",
-            "Comprehensive CORS support"
+        new_features: [
+            "HackerRank badge tracking",
+            "Contest medal counts",
+            "Domain-specific ELO scores",
+            "Language proficiency rankings"
         ]
     });
 });
+
 
 // Main aggregated dashboard endpoint (FULL FEATURED)
 app.post('/api/dashboard/aggregated', async (req, res) => {
@@ -1317,6 +1909,32 @@ app.get('/api/platforms/status', (req, res) => {
             api_endpoint: "https://api.github.com",
             rate_limit: "GitHub API limits apply"
         },
+hackerrank: {
+    status: "Available",
+    features: [
+        "Complete profile data", 
+        "Badge achievements", 
+        "Domain-specific scores and rankings",
+        "Contest performance and medals",
+        "Language proficiency tracking",
+        "Social metrics (followers, events)"
+    ],
+    data_points: [
+        "Problems solved", 
+        "Total badges and stars", 
+        "Contest medals (gold/silver/bronze)",
+        "Domain scores (20+ domains)",
+        "Language rankings",
+        "Practice and contest performance"
+    ],
+    rate_limit: "Moderate",
+    api_endpoints: [
+        "Profile data",
+        "Badges information", 
+        "ELO scores",
+        "Contest performance"
+    ]
+},
         atcoder: {
             status: "Available",
             features: ["Submission data", "Problem statistics", "Ranking info"],
@@ -1378,7 +1996,7 @@ app.get('/api/health', (req, res) => {
             cors_enabled: true,
             supported_platforms: Object.keys(multiAPI.platforms),
             available_platforms: Object.keys(multiAPI.platforms).filter(p => 
-                !['hackerrank', 'interviewbit', 'codestudio'].includes(p)
+                !['interviewbit', 'codestudio'].includes(p)
             ).length,
             total_platforms: Object.keys(multiAPI.platforms).length
         },
