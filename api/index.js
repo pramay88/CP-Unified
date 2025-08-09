@@ -224,53 +224,49 @@ class LeetCodeAPI {
         }
     }
 
-async fetchCalendarData(username) {
-    try {
-        const response = await axios.get(`${this.alfaURL}/${username}/calendar`, {
-            timeout: this.timeout,
-            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeetCode-Portfolio-API)' }
-        });
-        
-        const calendarData = response.data;
-        
-        // Process calendar data for heatmap
-        const submissionCalendar = calendarData.submissionCalendar || {};
-        const dailyActivity = [];
-        const today = new Date();
-        const oneYearAgo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate());
-        
-        // Create daily activity array for past year
-        for (let d = new Date(oneYearAgo); d <= today; d.setDate(d.getDate() + 1)) {
-            const timestamp = Math.floor(d.getTime() / 1000);
-            const dateStr = d.toISOString().split('T')[0];
-            const submissionCount = parseInt(submissionCalendar[timestamp]) || 0;
-            
-            dailyActivity.push({
-                date: dateStr,
-                total: submissionCount,
-                platforms: {
-                    leetcode: submissionCount
-                }
+    async fetchCalendarData(username) {
+        try {
+            const response = await axios.get(`${this.alfaURL}/${username}/calendar`, {
+                timeout: this.timeout,
+                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeetCode-Portfolio-API)' }
             });
+            
+            const calendarData = response.data;
+            
+            // Process calendar data for heatmap
+            const submissionCalendar = calendarData.submissionCalendar || {};
+            const dailyActivity = [];
+            const today = new Date();
+            const oneYearAgo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate());
+            
+            // Create daily activity array for past year
+            for (let d = new Date(oneYearAgo); d <= today; d.setDate(d.getDate() + 1)) {
+                const timestamp = Math.floor(d.getTime() / 1000);
+                const dateStr = d.toISOString().split('T')[0];
+                const submissionCount = parseInt(submissionCalendar[timestamp]) || 0;
+                
+                dailyActivity.push({
+                    date: dateStr,
+                    total: submissionCount,
+                    platforms: {
+                        leetcode: submissionCount
+                    }
+                });
+            }
+            
+            return {
+                totalSubmissions: Object.values(submissionCalendar).reduce((a, b) => a + parseInt(b), 0),
+                totalActiveDays: Object.values(submissionCalendar).filter(count => parseInt(count) > 0).length,
+                streak: calendarData.streak || 44,
+                currentStreak: calendarData.currentStreak || 0,
+                dailyActivity: dailyActivity,
+                submissionCalendar: submissionCalendar
+            };
+        } catch (error) {
+            console.log(`Calendar data fetch failed: ${error.message}`);
+            return null;
         }
-        
-        // Calculate REAL active days (only days with submissions > 0)
-        const realActiveDays = Object.values(submissionCalendar).filter(count => parseInt(count) > 0).length;
-        const totalSubmissions = Object.values(submissionCalendar).reduce((a, b) => a + parseInt(b), 0);
-        
-        return {
-            totalSubmissions: totalSubmissions,
-            totalActiveDays: realActiveDays, // This should be 156
-            streak: calendarData.streak || 44,
-            currentStreak: calendarData.currentStreak || 0,
-            dailyActivity: dailyActivity,
-            submissionCalendar: submissionCalendar
-        };
-    } catch (error) {
-        console.log(`Calendar data fetch failed: ${error.message}`);
-        return null;
     }
-}
 
     async fetchContestData(username) {
         try {
@@ -1908,7 +1904,7 @@ function calculateTotalStats(stats) {
 
 
 // ==========================================
-// FIXED: DAILY ACTIVITY PROCESSING FOR HEATMAP
+// DAILY ACTIVITY PROCESSING FOR HEATMAP
 // ==========================================
 
 function generateUnifiedActivityHeatmap(platformData) {
@@ -1947,14 +1943,6 @@ function generateUnifiedActivityHeatmap(platformData) {
         level: calculateActivityLevel(day.total)
     }));
 
-    // FIXED: Calculate correct summary stats
-    const activeDaysArray = activityArray.filter(day => day.total > 0);
-    const maxDailyActivity = Math.max(0, ...activityArray.map(day => day.total));
-    const totalContributions = activeDaysArray.reduce((sum, day) => sum + day.total, 0);
-    const averageDailyActivity = activityArray.length > 0 ? totalContributions / 365 : 0;
-
-    console.log(`Unified Heatmap Stats: ${activeDaysArray.length} active days, max: ${maxDailyActivity}, total: ${totalContributions}`);
-
     return {
         date_range: {
             start: yearAgo.toISOString().split('T')[0],
@@ -1962,376 +1950,12 @@ function generateUnifiedActivityHeatmap(platformData) {
         },
         daily_activity: activityArray,
         summary: {
-            total_active_days: activeDaysArray.length, // This should now be 156
-            max_daily_activity: maxDailyActivity,
-            average_daily_activity: Math.round(averageDailyActivity * 100) / 100,
+            total_active_days: activityArray.filter(day => day.total > 0).length,
+            max_daily_activity: Math.max(...activityArray.map(day => day.total)),
+            average_daily_activity: activityArray.reduce((sum, day) => sum + day.total, 0) / activityArray.length,
             platform_contributions: calculatePlatformContributions(activityArray)
         }
     };
-}
-
-// FIXED: LeetCode Activity Processing
-function processLeetCodeActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        console.log("Processing LeetCode activity...");
-        
-        // Use calendar data if available (most accurate)
-        if (data.calendar_data && data.calendar_data.dailyActivity) {
-            console.log(`Found ${data.calendar_data.dailyActivity.length} days of LeetCode calendar data`);
-            
-            data.calendar_data.dailyActivity.forEach(day => {
-                // Only process days within our date range and with actual activity
-                const dayDate = new Date(day.date);
-                if (dayDate >= startDate && dayDate <= endDate && day.total > 0) {
-                    const dateStr = day.date;
-                    if (dailyActivity[dateStr]) {
-                        // Don't overwrite, just set the LeetCode contribution
-                        dailyActivity[dateStr].platforms.leetcode = day.total;
-                        dailyActivity[dateStr].total += day.total;
-                    }
-                }
-            });
-        }
-        // Fallback: Use submission calendar from API
-        else if (data.calendar_data && data.calendar_data.submissionCalendar) {
-            console.log("Using LeetCode submission calendar data");
-            
-            Object.entries(data.calendar_data.submissionCalendar).forEach(([timestamp, count]) => {
-                const date = new Date(parseInt(timestamp) * 1000);
-                if (date >= startDate && date <= endDate && parseInt(count) > 0) {
-                    const dateStr = date.toISOString().split('T')[0];
-                    if (dailyActivity[dateStr]) {
-                        dailyActivity[dateStr].platforms.leetcode = parseInt(count);
-                        dailyActivity[dateStr].total += parseInt(count);
-                    }
-                }
-            });
-        }
-        // Final fallback: Use recent submissions
-        else if (data.submissions && Array.isArray(data.submissions)) {
-            console.log("Using LeetCode recent submissions data");
-            
-            data.submissions.forEach(submission => {
-                const timestamp = parseInt(submission.timestamp) * 1000;
-                const date = new Date(timestamp);
-                
-                if (date >= startDate && date <= endDate) {
-                    const dateStr = date.toISOString().split('T')[0];
-                    if (dailyActivity[dateStr]) {
-                        dailyActivity[dateStr].platforms.leetcode += 1;
-                        dailyActivity[dateStr].total += 1;
-                    }
-                }
-            });
-        }
-        
-        // Log LeetCode contribution summary
-        const leetcodeTotal = Object.values(dailyActivity).reduce((sum, day) => sum + day.platforms.leetcode, 0);
-        const leetcodeActiveDays = Object.values(dailyActivity).filter(day => day.platforms.leetcode > 0).length;
-        console.log(`LeetCode processed: ${leetcodeTotal} total contributions across ${leetcodeActiveDays} active days`);
-        
-    } catch (error) {
-        console.log('Error processing LeetCode activity:', error.message);
-    }
-}
-
-// FIXED: CodeForces Activity Processing
-function processCodeForcesActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        console.log("Processing CodeForces activity...");
-        
-        // Use actual submission data if available
-        if (data.submissions && data.submissions.result && Array.isArray(data.submissions.result)) {
-            console.log(`Found ${data.submissions.result.length} CodeForces submissions`);
-            
-            const dailySubmissions = new Map();
-            
-            data.submissions.result.forEach(submission => {
-                const date = new Date(submission.creationTimeSeconds * 1000);
-                if (date >= startDate && date <= endDate) {
-                    const dateStr = date.toISOString().split('T')[0];
-                    dailySubmissions.set(dateStr, (dailySubmissions.get(dateStr) || 0) + 1);
-                }
-            });
-
-            dailySubmissions.forEach((count, dateStr) => {
-                if (dailyActivity[dateStr]) {
-                    dailyActivity[dateStr].platforms.codeforces = count;
-                    dailyActivity[dateStr].total += count;
-                }
-            });
-            
-            console.log(`CodeForces processed: ${Array.from(dailySubmissions.values()).reduce((a, b) => a + b, 0)} submissions across ${dailySubmissions.size} days`);
-        }
-        // Fallback: Estimate based on problems solved
-        else {
-            const problemsSolved = data.detailed_stats?.problems_solved || 0;
-            if (problemsSolved > 0) {
-                // Distribute over last 90 days with realistic pattern
-                const recentDays = Math.min(90, Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)));
-                let remaining = Math.min(problemsSolved, 100); // Cap estimation
-                
-                for (let i = 0; i < recentDays && remaining > 0; i++) {
-                    const date = new Date(endDate);
-                    date.setDate(date.getDate() - i);
-                    const dateStr = date.toISOString().split('T')[0];
-                    
-                    if (dailyActivity[dateStr] && Math.random() < 0.15) { // 15% chance per day
-                        const activity = Math.min(remaining, Math.floor(Math.random() * 2) + 1);
-                        dailyActivity[dateStr].platforms.codeforces += activity;
-                        dailyActivity[dateStr].total += activity;
-                        remaining -= activity;
-                    }
-                }
-                
-                console.log(`CodeForces estimated: ${problemsSolved - remaining} contributions distributed`);
-            }
-        }
-    } catch (error) {
-        console.log('Error processing CodeForces activity:', error.message);
-    }
-}
-
-// FIXED: CodeChef Activity Processing
-function processCodeChefActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        console.log("Processing CodeChef activity...");
-        
-        // Use heatmap data if available
-        if (data.heatMap && Array.isArray(data.heatMap)) {
-            console.log(`Found ${data.heatMap.length} days of CodeChef heatmap data`);
-            
-            data.heatMap.forEach(day => {
-                if (day.date && day.value > 0) {
-                    const dayDate = new Date(day.date);
-                    if (dayDate >= startDate && dayDate <= endDate) {
-                        const dateStr = day.date;
-                        if (dailyActivity[dateStr]) {
-                            dailyActivity[dateStr].platforms.codechef = day.value;
-                            dailyActivity[dateStr].total += day.value;
-                        }
-                    }
-                }
-            });
-            
-            const codechefTotal = data.heatMap.reduce((sum, day) => sum + (day.value || 0), 0);
-            const codechefActiveDays = data.heatMap.filter(day => day.value > 0).length;
-            console.log(`CodeChef processed: ${codechefTotal} contributions across ${codechefActiveDays} active days`);
-        }
-        // Fallback: Estimate based on problems solved
-        else {
-            const problemsSolved = data.detailed_stats?.problems_solved || 0;
-            if (problemsSolved > 0) {
-                // Distribute over last 6 months with realistic pattern
-                const activeDays = Math.min(180, Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)));
-                let remaining = Math.min(problemsSolved, 150); // Cap estimation
-                
-                for (let i = 0; i < activeDays && remaining > 0; i++) {
-                    const date = new Date(endDate);
-                    date.setDate(date.getDate() - i);
-                    const dateStr = date.toISOString().split('T')[0];
-                    
-                    if (dailyActivity[dateStr] && Math.random() < 0.2) { // 20% chance per day
-                        const activity = Math.min(remaining, Math.floor(Math.random() * 2) + 1);
-                        dailyActivity[dateStr].platforms.codechef += activity;
-                        dailyActivity[dateStr].total += activity;
-                        remaining -= activity;
-                    }
-                }
-                
-                console.log(`CodeChef estimated: ${problemsSolved - remaining} contributions distributed`);
-            }
-        }
-    } catch (error) {
-        console.log('Error processing CodeChef activity:', error.message);
-    }
-}
-
-// FIXED: GitHub Activity Processing
-function processGitHubActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        console.log("Processing GitHub activity...");
-        
-        const events = data.recent_activity || [];
-        let processedEvents = 0;
-        
-        events.forEach(event => {
-            const date = new Date(event.created_at);
-            
-            if (date >= startDate && date <= endDate) {
-                const dateStr = date.toISOString().split('T')[0];
-                if (dailyActivity[dateStr]) {
-                    let activityCount = 1;
-                    
-                    // Weight different event types
-                    switch (event.type) {
-                        case 'PushEvent':
-                            activityCount = Math.min(event.payload?.commits?.length || 1, 5); // Cap at 5
-                            break;
-                        case 'PullRequestEvent':
-                            activityCount = 2;
-                            break;
-                        case 'IssuesEvent':
-                            activityCount = 1;
-                            break;
-                        case 'CreateEvent':
-                            activityCount = 1;
-                            break;
-                        default:
-                            activityCount = 1;
-                    }
-                    
-                    dailyActivity[dateStr].platforms.github += activityCount;
-                    dailyActivity[dateStr].total += activityCount;
-                    processedEvents += activityCount;
-                }
-            }
-        });
-        
-        console.log(`GitHub processed: ${processedEvents} activities from ${events.length} events`);
-    } catch (error) {
-        console.log('Error processing GitHub activity:', error.message);
-    }
-}
-
-// FIXED: GeeksForGeeks Activity Processing
-function processGeeksForGeeksActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        console.log("Processing GeeksForGeeks activity...");
-        
-        const problemsSolved = data.detailed_stats?.problems_solved || 0;
-        const currentStreak = data.detailed_stats?.current_streak || 0;
-        
-        if (problemsSolved > 0) {
-            // Add recent streak activity (more accurate)
-            let addedFromStreak = 0;
-            for (let i = 0; i < Math.min(currentStreak, 30); i++) {
-                const date = new Date(endDate);
-                date.setDate(date.getDate() - i);
-                const dateStr = date.toISOString().split('T')[0];
-                
-                if (dailyActivity[dateStr]) {
-                    dailyActivity[dateStr].platforms.geeksforgeeks += 1;
-                    dailyActivity[dateStr].total += 1;
-                    addedFromStreak += 1;
-                }
-            }
-            
-            // Distribute remaining problems over longer period
-            let remaining = Math.max(0, Math.min(problemsSolved - addedFromStreak, 100)); // Cap estimation
-            const activeDays = Math.min(120, Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)));
-            
-            for (let i = currentStreak; i < activeDays && remaining > 0; i++) {
-                const date = new Date(endDate);
-                date.setDate(date.getDate() - i);
-                const dateStr = date.toISOString().split('T')[0];
-                
-                if (dailyActivity[dateStr] && Math.random() < 0.15) { // 15% chance per day
-                    const activity = Math.min(remaining, Math.floor(Math.random() * 2) + 1);
-                    dailyActivity[dateStr].platforms.geeksforgeeks += activity;
-                    dailyActivity[dateStr].total += activity;
-                    remaining -= activity;
-                }
-            }
-            
-            console.log(`GeeksForGeeks processed: ${addedFromStreak} from streak + ${problemsSolved - addedFromStreak - remaining} estimated`);
-        }
-    } catch (error) {
-        console.log('Error processing GeeksForGeeks activity:', error.message);
-    }
-}
-
-// FIXED: HackerRank Activity Processing
-function processHackerRankActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        console.log("Processing HackerRank activity...");
-        
-        const problemsSolved = data.detailed_stats?.problems_solved || data.detailed_stats?.achievement_summary?.total_problems_solved || 0;
-        
-        if (problemsSolved > 0) {
-            // Distribute over last 90 days with realistic pattern
-            const activeDays = Math.min(90, Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)));
-            let remaining = Math.min(problemsSolved, 80); // Cap estimation
-            
-            for (let i = 0; i < activeDays && remaining > 0; i++) {
-                const date = new Date(endDate);
-                date.setDate(date.getDate() - i);
-                const dateStr = date.toISOString().split('T')[0];
-                
-                if (dailyActivity[dateStr] && Math.random() < 0.18) { // 18% chance per day
-                    const activity = Math.min(remaining, Math.floor(Math.random() * 3) + 1);
-                    dailyActivity[dateStr].platforms.hackerrank += activity;
-                    dailyActivity[dateStr].total += activity;
-                    remaining -= activity;
-                }
-            }
-            
-            console.log(`HackerRank processed: ${problemsSolved - remaining} contributions distributed`);
-        }
-    } catch (error) {
-        console.log('Error processing HackerRank activity:', error.message);
-    }
-}
-
-// FIXED: AtCoder Activity Processing  
-function processAtCoderActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        console.log("Processing AtCoder activity...");
-        
-        const submissions = data.submissions || [];
-        let processedSubmissions = 0;
-        
-        submissions.forEach(submission => {
-            const timestamp = submission.epoch_second * 1000;
-            const date = new Date(timestamp);
-            
-            if (date >= startDate && date <= endDate && submission.result === 'AC') {
-                const dateStr = date.toISOString().split('T')[0];
-                if (dailyActivity[dateStr]) {
-                    dailyActivity[dateStr].platforms.atcoder += 1;
-                    dailyActivity[dateStr].total += 1;
-                    processedSubmissions += 1;
-                }
-            }
-        });
-        
-        console.log(`AtCoder processed: ${processedSubmissions} accepted submissions`);
-    } catch (error) {
-        console.log('Error processing AtCoder activity:', error.message);
-    }
-}
-
-// FIXED: Platform Contributions Calculator
-function calculatePlatformContributions(activityArray) {
-    const contributions = {
-        leetcode: 0,
-        codeforces: 0,
-        codechef: 0,
-        github: 0,
-        geeksforgeeks: 0,
-        hackerrank: 0,
-        atcoder: 0
-    };
-    
-    activityArray.forEach(day => {
-        Object.keys(contributions).forEach(platform => {
-            contributions[platform] += day.platforms[platform] || 0;
-        });
-    });
-    
-    // Log final contributions for debugging
-    console.log("Final platform contributions:", contributions);
-    
-    return contributions;
-}
-
-// Activity level calculator (0-4 scale like GitHub)
-function calculateActivityLevel(count) {
-    if (count === 0) return 0;
-    if (count <= 2) return 1;
-    if (count <= 4) return 2;
-    if (count <= 6) return 3;
-    return 4;
 }
 
 function processPlatformActivity(platform, data, dailyActivity, startDate, endDate) {
