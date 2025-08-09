@@ -326,25 +326,57 @@ class CodeForcesAPI {
         this.timeout = 8000;
     }
 
+    async sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async fetchWithRetry(url, retries = 3, delay = 1000) {
+        for (let i = 0; i < retries; i++) {
+            try {
+                const response = await axios.get(url, {
+                    timeout: this.timeout,
+                    headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
+                });
+                return response;
+            } catch (error) {
+                console.log(`Attempt ${i + 1} failed for ${url}: ${error.message}`);
+                if (i === retries - 1) throw error;
+                await this.sleep(delay * Math.pow(2, i));
+            }
+        }
+    }
+
     async getUserData(handle) {
         try {
             await this.sleep(400);
             
-            const [userInfo, ratings, submissions] = await Promise.allSettled([
+            const [userInfo, ratings, submissions, contestData] = await Promise.allSettled([
                 this.fetchWithRetry(`${this.baseURL}/user.info?handles=${handle}`),
                 this.fetchWithRetry(`${this.baseURL}/user.rating?handle=${handle}`),
-                this.fetchWithRetry(`${this.baseURL}/user.status?handle=${handle}&from=1&count=10000`) // Increased count
+                this.fetchWithRetry(`${this.baseURL}/user.status?handle=${handle}&from=1&count=10000`),
+                this.fetchContestData(handle)
             ]);
 
             const userData = userInfo.status === 'fulfilled' ? userInfo.value.data?.result?.[0] : null;
             const ratingsData = ratings.status === 'fulfilled' ? ratings.value.data?.result : null;
             const submissionsData = submissions.status === 'fulfilled' ? submissions.value.data?.result : null;
+            const contests = contestData.status === 'fulfilled' ? contestData.value : null;
+
+            if (!userData) {
+                return { 
+                    status: "FAILED", 
+                    platform: "codeforces", 
+                    username: handle, 
+                    error: "User not found" 
+                };
+            }
 
             return {
                 status: "OK",
                 platform: "codeforces",
                 username: handle,
                 profile: userData,
+                contests: contests,
                 detailed_stats: this.calculateDetailedStats(userData, ratingsData, submissionsData)
             };
         } catch (error) {
@@ -358,67 +390,100 @@ class CodeForcesAPI {
         }
     }
 
-    async fetchWithRetry(url, retries = 2) {
-        for (let i = 0; i <= retries; i++) {
-            try {
-                return await axios.get(url, { 
-                    timeout: this.timeout,
-                    headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
-                });
-            } catch (error) {
-                if (i === retries) throw error;
-                await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+    async fetchContestData(handle) {
+        try {
+            const response = await this.fetchWithRetry(`${this.baseURL}/user.rating?handle=${handle}`);
+            const ratingsData = response.data?.result || [];
+            
+            if (ratingsData.length === 0) {
+                return {
+                    contestsAttended: 0,
+                    recentContests: [],
+                    bestRank: null,
+                    worstRank: null,
+                    maxRatingGain: 0,
+                    maxRatingLoss: 0,
+                    ratingProgression: []
+                };
             }
+
+            const recentContests = ratingsData.slice(-10).map(contest => ({
+                contestId: contest.contestId,
+                contestName: contest.contestName,
+                rank: contest.rank,
+                oldRating: contest.oldRating,
+                newRating: contest.newRating,
+                ratingChange: contest.newRating - contest.oldRating,
+                participationTime: new Date(contest.ratingUpdateTimeSeconds * 1000).toISOString()
+            }));
+
+            return {
+                contestsAttended: ratingsData.length,
+                recentContests: recentContests,
+                bestRank: Math.min(...ratingsData.map(c => c.rank)),
+                worstRank: Math.max(...ratingsData.map(c => c.rank)),
+                maxRatingGain: Math.max(...ratingsData.map(c => c.newRating - c.oldRating)),
+                maxRatingLoss: Math.min(...ratingsData.map(c => c.newRating - c.oldRating)),
+                ratingProgression: ratingsData.map(c => ({
+                    date: new Date(c.ratingUpdateTimeSeconds * 1000).toISOString(),
+                    rating: c.newRating,
+                    contest: c.contestName
+                }))
+            };
+        } catch (error) {
+            console.log(`Codeforces contest data fetch failed: ${error.message}`);
+            return null;
         }
     }
 
-    calculateDetailedStats(profile, ratings, submissions) {
-        if (!profile) return {};
+    calculateDetailedStats(userData, ratingsData, submissionsData) {
+        const stats = {
+            current_rating: userData.rating || 0,
+            max_rating: userData.maxRating || 0,
+            rank: userData.rank || 'Unrated',
+            max_rank: userData.maxRank || 'Unrated',
+            contribution: userData.contribution || 0,
+            problems_solved: 0,
+            contests_participated: ratingsData ? ratingsData.length : 0,
+            language_stats: {},
+            verdict_stats: {},
+            difficulty_distribution: {},
+            yearly_submissions: {}
+        };
 
-        // Calculate ALL unique problems solved from submissions
-        let problemsSolved = 0;
-        const solvedProblems = new Set();
-        
-        if (submissions) {
-            submissions.forEach(sub => {
-                if (sub.verdict === 'OK') {
-                    const problemKey = `${sub.problem.contestId}-${sub.problem.index}`;
-                    solvedProblems.add(problemKey);
+        if (submissionsData) {
+            const acceptedProblems = new Set();
+            
+            submissionsData.forEach(submission => {
+                const year = new Date(submission.creationTimeSeconds * 1000).getFullYear();
+                stats.yearly_submissions[year] = (stats.yearly_submissions[year] || 0) + 1;
+                
+                stats.language_stats[submission.programmingLanguage] = 
+                    (stats.language_stats[submission.programmingLanguage] || 0) + 1;
+                
+                stats.verdict_stats[submission.verdict] = 
+                    (stats.verdict_stats[submission.verdict] || 0) + 1;
+
+                if (submission.verdict === 'OK') {
+                    acceptedProblems.add(`${submission.problem.contestId}-${submission.problem.index}`);
+                    
+                    const rating = submission.problem.rating;
+                    if (rating) {
+                        const bucket = Math.floor(rating / 100) * 100;
+                        stats.difficulty_distribution[bucket] = 
+                            (stats.difficulty_distribution[bucket] || 0) + 1;
+                    }
                 }
             });
-            problemsSolved = solvedProblems.size;
+            
+            stats.problems_solved = acceptedProblems.size;
         }
 
-        // Get rating info
-        const currentRating = profile.rating || 0;
-        const maxRating = profile.maxRating || currentRating;
-        const rank = profile.rank || "unrated";
-        const maxRank = profile.maxRank || rank;
-
-        // Calculate contest stats
-        const contestsParticipated = ratings ? ratings.length : 0;
-        const acceptanceRate = submissions && submissions.length > 0 ? 
-            ((submissions.filter(s => s.verdict === 'OK').length / submissions.length) * 100).toFixed(2) : 0;
-
-        return {
-            current_rating: currentRating,
-            max_rating: maxRating,
-            rank: rank,
-            max_rank: maxRank,
-            problems_solved: problemsSolved, // This now correctly counts ALL unique problems
-            contests_participated: contestsParticipated,
-            acceptance_rate: parseFloat(acceptanceRate),
-            total_submissions: submissions ? submissions.length : 0,
-            contribution: profile.contribution || 0,
-            last_online: profile.lastOnlineTimeSeconds ? 
-                new Date(profile.lastOnlineTimeSeconds * 1000).toISOString() : null
-        };
-    }
-
-    async sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
+        return stats;
     }
 }
+
+
 
 
 
@@ -454,6 +519,8 @@ class CodeChefAPI {
 
                 // Extract problems solved using multiple methods
                 const problemsSolved = this.extractProblemsSolved(document, htmlData);
+
+                const contestData = this.extractContestData(document, htmlData);
 
                 // Extract rating data
                 let ratingData = null;
@@ -504,7 +571,8 @@ class CodeChefAPI {
                         country_rank: this.extractRank(ratingRanks, 'country') || 0,
                         stars: ratingElement?.textContent?.trim() || "unrated",
                         division: this.getDivisionFromRating(currentRating)
-                    }
+                    },
+                    contests: contestData
                 };
             } else {
                 throw new Error(`HTTP ${response.status}: Could not fetch profile`);
@@ -571,6 +639,56 @@ class CodeChefAPI {
         console.log('All methods failed to extract problems solved count');
         return 0;
     }
+
+    extractContestData(document, htmlData) {
+        try {
+            let contestData = null;
+            const ratingsStart = htmlData.search("var all_rating = ") + "var all_rating = ".length;
+            const ratingsEnd = htmlData.search("var current_user_rating =") - 6;
+            
+            if (ratingsStart > -1 && ratingsEnd > ratingsStart) {
+                const ratingsDataStr = htmlData.substring(ratingsStart, ratingsEnd);
+                const ratingsData = JSON.parse(ratingsDataStr);
+                
+                if (ratingsData && ratingsData.length > 0) {
+                    const recentContests = ratingsData.slice(-10).map(contest => ({
+                        contestId: contest.contest_id || contest.code,
+                        contestName: contest.name || contest.contest_name,
+                        rating: contest.rating,
+                        rank: contest.rank,
+                        endDate: contest.end_date,
+                        participationTime: contest.end_date
+                    }));
+
+                    contestData = {
+                        contestsAttended: ratingsData.length,
+                        recentContests: recentContests,
+                        bestRank: ratingsData.filter(c => c.rank).length > 0 ? 
+                            Math.min(...ratingsData.filter(c => c.rank).map(c => c.rank)) : null,
+                        worstRank: ratingsData.filter(c => c.rank).length > 0 ? 
+                            Math.max(...ratingsData.filter(c => c.rank).map(c => c.rank)) : null,
+                        ratingProgression: ratingsData.map(c => ({
+                            date: c.end_date,
+                            rating: c.rating,
+                            contest: c.name
+                        }))
+                    };
+                }
+            }
+
+            return contestData || {
+                contestsAttended: 0,
+                recentContests: [],
+                bestRank: null,
+                worstRank: null,
+                ratingProgression: []
+            };
+        } catch (error) {
+            console.log('CodeChef contest data extraction failed:', error.message);
+            return null;
+        }
+    }
+
 
     extractFromPageData(htmlData) {
         try {
@@ -1106,19 +1224,20 @@ class HackerRankAPI {
             console.log(`Fetching HackerRank data for: ${username}`);
             
             // Try all available HackerRank API endpoints
-            const [profileData, badgesData, scoresEloData, contestProfileData] = await Promise.allSettled([
+            const [profileData, badgesData, scoresEloData, contestData] = await Promise.allSettled([
                 this.fetchProfile(username),
                 this.fetchBadges(username),
                 this.fetchScoresElo(username),
-                this.fetchContestProfile(username)
+                this.fetchContestPerformance(username)
             ]);
 
             const profile = profileData.status === 'fulfilled' ? profileData.value : null;
             const badges = badgesData.status === 'fulfilled' ? badgesData.value : null;
             const scoresElo = scoresEloData.status === 'fulfilled' ? scoresEloData.value : null;
-            const contestProfile = contestProfileData.status === 'fulfilled' ? contestProfileData.value : null;
+            const contests = contestData.status === 'fulfilled' ? contestData.value : null;
 
-            if (!profile && !badges && !scoresElo && !contestProfile) {
+
+            if (!profile && !badges && !scoresElo && !contests) {
                 throw new Error("All HackerRank data sources failed");
             }
 
@@ -1126,37 +1245,37 @@ class HackerRankAPI {
             const badgeStats = this.processBadgesData(badges);
             const profileStats = this.processProfileData(profile);
             const eloStats = this.processScoresEloData(scoresElo);
-            const contestStats = this.processContestProfileData(contestProfile);
+            // const contests = this.processContestProfileData(contestProfile);
 
             return {
                 status: "OK",
                 platform: "hackerrank",
                 username: username,
                 profile: {
-                    name: profileStats.name || contestStats.name || username,
+                    name: profileStats.name || username,
                     username: username,
-                    avatar: profileStats.avatar || contestStats.avatar || `https://www.hackerrank.com/rest/hackers/${username}/avatar`,
-                    country: profileStats.country || contestStats.country || null,
-                    school: profileStats.school || contestStats.school || null,
-                    company: profileStats.company || contestStats.company || null,
+                    avatar: profileStats.avatar || contests.avatar || `https://www.hackerrank.com/rest/hackers/${username}/avatar`,
+                    country: profileStats.country || contests.country || null,
+                    school: profileStats.school || contests.school || null,
+                    company: profileStats.company || contests.company || null,
                     website: profileStats.website || null,
                     linkedin: profileStats.linkedin || null,
                     github: profileStats.github || null,
-                    created_at: profileStats.created_at || contestStats.created_at || null,
+                    created_at: profileStats.created_at || contests.created_at || null,
                     bio: profileStats.bio || null,
                     location: profileStats.location || null,
-                    title: contestStats.title || null
+                    title: contests.title || null
                 },
                 detailed_stats: {
                     // Core Statistics
                     rank: profileStats.rank || 0,
-                    level: profileStats.level || contestStats.level || badgeStats.highest_level || 1,
+                    level: profileStats.level || contests.level || badgeStats.highest_level || 1,
                     hackos: profileStats.hackos || 0,
                     
                     // Social Statistics  
-                    followers: profileStats.followers || contestStats.followers || 0,
+                    followers: profileStats.followers || contests.followers || 0,
                     following: profileStats.following || 0,
-                    event_count: contestStats.event_count || 0,
+                    event_count: contests.event_count || 0,
                     
                     // Badge Information
                     badges: badgeStats.badges,
@@ -1218,12 +1337,13 @@ class HackerRankAPI {
                     
                     // Comprehensive Statistics
                     comprehensive_stats: {
-                        profile_completeness: this.calculateProfileCompleteness(profileStats, contestStats),
+                        profile_completeness: this.calculateProfileCompleteness(profileStats, contests),
                         skill_diversity: Object.keys(eloStats.domain_scores).filter(domain => 
                             eloStats.domain_scores[domain].score > 0).length,
                         contest_consistency: eloStats.contest_consistency || 0
                     }
-                }
+                },
+                contests: contests
             };
         } catch (error) {
             console.error(`HackerRank API Error for ${username}:`, error.message);
@@ -1307,6 +1427,53 @@ class HackerRankAPI {
             return response.data.model;
         } catch (error) {
             console.log(`HackerRank contest profile fetch failed: ${error.message}`);
+            return null;
+        }
+    }
+
+    async fetchContestPerformance(username) {
+        try {
+            const response = await axios.get(`${this.baseURL}/${username}/scores_elo`, {
+                timeout: this.timeout,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json'
+                }
+            });
+
+            const scoresData = response.data || [];
+            const contestsData = {
+                totalContestsParticipated: 0,
+                totalMedals: { gold: 0, silver: 0, bronze: 0 },
+                domainPerformance: {},
+                recentContests: []
+            };
+
+            scoresData.forEach(domain => {
+                if (domain.contest && domain.contest.medals) {
+                    const medals = domain.contest.medals;
+                    contestsData.totalMedals.gold += medals.gold || 0;
+                    contestsData.totalMedals.silver += medals.silver || 0;
+                    contestsData.totalMedals.bronze += medals.bronze || 0;
+                    
+                    if (medals.gold > 0 || medals.silver > 0 || medals.bronze > 0) {
+                        contestsData.totalContestsParticipated++;
+                    }
+
+                    if (domain.contest.score > 0) {
+                        contestsData.domainPerformance[domain.name] = {
+                            score: domain.contest.score,
+                            rank: domain.contest.rank,
+                            level: domain.contest.level,
+                            medals: medals
+                        };
+                    }
+                }
+            });
+
+            return contestsData;
+        } catch (error) {
+            console.log(`HackerRank contest data fetch failed: ${error.message}`);
             return null;
         }
     }
@@ -1591,12 +1758,12 @@ class HackerRankAPI {
             }));
     }
 
-    calculateProfileCompleteness(profileStats, contestStats) {
+    calculateProfileCompleteness(profileStats, contests) {
         let completeness = 0;
         const fields = ['name', 'country', 'school', 'company', 'bio', 'avatar'];
         
         fields.forEach(field => {
-            if (profileStats[field] || contestStats[field]) {
+            if (profileStats[field] || contests[field]) {
                 completeness += 100 / fields.length;
             }
         });
