@@ -648,9 +648,6 @@ class CodeForcesAPI {
 }
 
 
-
-
-
 class CodeChefAPI {
     constructor() {
         this.timeout = 15000;
@@ -721,22 +718,25 @@ class CodeChefAPI {
                     username: handle,
                     profile: {
                         name: this.extractName(userDetailsContainer) || handle,
+                        // countryFlag: userCountryFlag?.src || null,
+                        // countryName: userCountryName?.textContent?.trim() || null,
+                        username: handle,
                         avatar: userDetailsContainer?.querySelector('img')?.src || null,
-                        countryFlag: userCountryFlag?.src || null,
-                        countryName: userCountryName?.textContent?.trim() || null,
-                        username: handle
+                        globalRank: this.extractRank(ratingRanks, 'global') || 0,
+                        countryRank: this.extractRank(ratingRanks, 'country') || 0,
+                        stars: ratingElement?.textContent?.trim() || "unrated",
+
                     },
-                    detailed_stats: {
+                    solvedStats: {
+                        totalSolved: problemsSolved,
+                        
+                    },
+                    contests: {
                         current_rating: currentRating,
                         highest_rating: highestRating,
-                        problems_solved: problemsSolved,
-                        contests_attended: ratingData ? ratingData.length : 0,
-                        global_rank: this.extractRank(ratingRanks, 'global') || 0,
-                        country_rank: this.extractRank(ratingRanks, 'country') || 0,
-                        stars: ratingElement?.textContent?.trim() || "unrated",
-                        division: this.getDivisionFromRating(currentRating)
-                    },
-                    contests: contestData
+                        division: this.getDivisionFromRating(currentRating),
+                        contestData
+                    }
                 };
             } else {
                 throw new Error(`HTTP ${response.status}: Could not fetch profile`);
