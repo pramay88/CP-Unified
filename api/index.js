@@ -706,6 +706,7 @@ class CodeChefAPI {
                 const userCountryFlag = document.querySelector(".user-country-flag");
                 const userCountryName = document.querySelector(".user-country-name");
                 const ratingElement = document.querySelector(".rating");
+                const badges = this.extractBadgesData(document, htmlData);
 
                 const currentRating = parseInt(ratingNumber?.textContent?.replace(/[^\d]/g, '')) || 0;
                 if (highestRating === 0) {
@@ -736,7 +737,13 @@ class CodeChefAPI {
                         highest_rating: highestRating,
                         division: this.getDivisionFromRating(currentRating),
                         contestData
+                    },
+                    badges: {
+                        totalBadges: badges.length,
+                        badges: badges,
+                        stats: this.categorizeBadgeStats(badges)
                     }
+
                 };
             } else {
                 throw new Error(`HTTP ${response.status}: Could not fetch profile`);
@@ -1084,6 +1091,154 @@ class CodeChefAPI {
         if (rating >= 1000) return "Division 4";
         return "Unrated";
     }
+
+    // Replace the previous badge extraction methods with this optimized version
+extractBadgesData(document, htmlData) {
+    try {
+        console.log('Extracting badges data from CodeChef...');
+        
+        // Look for the badges widget container
+        const badgesWidget = document.querySelector('.widget.badges');
+        if (!badgesWidget) {
+            console.log('No badges widget found');
+            return [];
+        }
+
+        const badgeElements = badgesWidget.querySelectorAll('.badge');
+        const badges = [];
+
+        badgeElements.forEach(badgeElement => {
+            try {
+                const badge = this.parseBadgeElement(badgeElement);
+                if (badge) {
+                    badges.push(badge);
+                }
+            } catch (error) {
+                console.log('Error parsing individual badge:', error.message);
+            }
+        });
+
+        console.log(`Successfully extracted ${badges.length} badges`);
+        return badges;
+    } catch (error) {
+        console.log('extractBadgesData failed:', error.message);
+        return [];
+    }
+}
+
+parseBadgeElement(badgeElement) {
+    try {
+        // Extract image and alt text
+        const img = badgeElement.querySelector('.badge__image img');
+        const icon = img?.src || null;
+        const altText = img?.alt || '';
+
+        // Extract title
+        const titleElement = badgeElement.querySelector('.badge__title');
+        const title = titleElement?.textContent?.trim() || '';
+
+        // Extract description and goal
+        const descriptionElement = badgeElement.querySelector('.badge__description');
+        let description = '';
+        let goal = null;
+
+        if (descriptionElement) {
+            description = descriptionElement.textContent?.trim() || '';
+            
+            // Extract the goal number from the span
+            const goalElement = descriptionElement.querySelector('.badge__goal');
+            if (goalElement) {
+                goal = parseInt(goalElement.textContent?.trim()) || null;
+            }
+        }
+
+        // Determine category and level from the badge
+        const category = this.determineBadgeCategory(title, description, icon);
+        const level = this.determineBadgeLevel(title, icon);
+
+        return {
+            name: title || altText,
+            description: description,
+            icon: icon,
+            category: category,
+            level: level,
+            goal: goal,
+            earnedDate: null // CodeChef doesn't seem to show earned dates in this structure
+        };
+    } catch (error) {
+        console.log('parseBadgeElement failed:', error.message);
+        return null;
+    }
+}
+
+determineBadgeCategory(title, description, icon) {
+    const titleLower = (title || '').toLowerCase();
+    const descriptionLower = (description || '').toLowerCase();
+    const iconLower = (icon || '').toLowerCase();
+
+    if (titleLower.includes('contest') || descriptionLower.includes('contest') || iconLower.includes('contest')) {
+        return 'contest';
+    }
+    if (titleLower.includes('problem') || descriptionLower.includes('problem') || iconLower.includes('problem')) {
+        return 'problem_solving';
+    }
+    if (titleLower.includes('rating') || descriptionLower.includes('rating') || iconLower.includes('rating')) {
+        return 'rating';
+    }
+    if (titleLower.includes('streak') || descriptionLower.includes('streak') || descriptionLower.includes('daily')) {
+        return 'consistency';
+    }
+    if (titleLower.includes('participation') || descriptionLower.includes('participating')) {
+        return 'participation';
+    }
+    
+    return 'general';
+}
+
+determineBadgeLevel(title, icon) {
+    const titleLower = (title || '').toLowerCase();
+    const iconLower = (icon || '').toLowerCase();
+
+    if (titleLower.includes('bronze') || iconLower.includes('bronze')) {
+        return 'bronze';
+    }
+    if (titleLower.includes('silver') || iconLower.includes('silver')) {
+        return 'silver';
+    }
+    if (titleLower.includes('gold') || iconLower.includes('gold')) {
+        return 'gold';
+    }
+    if (titleLower.includes('platinum') || iconLower.includes('platinum')) {
+        return 'platinum';
+    }
+    if (titleLower.includes('diamond') || iconLower.includes('diamond')) {
+        return 'diamond';
+    }
+    
+    return 'unknown';
+}
+
+// Helper method to categorize badge statistics
+categorizeBadgeStats(badges) {
+    const categories = {};
+    const levels = {};
+    
+    badges.forEach(badge => {
+        // Count by category
+        const category = badge.category || 'general';
+        categories[category] = (categories[category] || 0) + 1;
+        
+        // Count by level
+        const level = badge.level || 'unknown';
+        levels[level] = (levels[level] || 0) + 1;
+    });
+    
+    return {
+        byCategory: categories,
+        byLevel: levels
+    };
+}
+
 }
 
 
