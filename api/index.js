@@ -103,7 +103,8 @@ class MultiPlatformAPI {
 class LeetCodeAPI {
     constructor() {
         this.graphqlURL = 'https://leetcode.com/graphql';
-        this.alfaURL = 'https://alfa-leetcode-api.onrender.com';
+        this.alfaURL = "http://localhost:8000" || 'https://alfa-leetcode-api.onrender.com';
+        this.localApi = "http://localhost:8000";
         this.timeout = 15000;
     }
 
@@ -112,12 +113,15 @@ class LeetCodeAPI {
             console.log(`Fetching comprehensive LeetCode data for: ${username}`);
             
             // Fetch all data sources in parallel
-            const [profileData, calendarData, contestData, languageData, skillData] = await Promise.allSettled([
+            const [profileData, solvedStats, calendarData, contestData, languageData, skillData, badgesData, dailyProblemData] = await Promise.allSettled([
                 this.fetchProfileFromAlfa(username),
+                this.fetchSolvedStats(username),
                 this.fetchCalendarData(username),
                 this.fetchContestData(username),
                 this.fetchLanguageStats(username),
-                this.fetchSkillStats(username)
+                this.fetchSkillStats(username),
+                this.getBadges(username),
+                this.getDailyProblem()
             ]);
 
             const profile = profileData.status === 'fulfilled' ? profileData.value : null;
@@ -125,6 +129,9 @@ class LeetCodeAPI {
             const contests = contestData.status === 'fulfilled' ? contestData.value : null;
             const languages = languageData.status === 'fulfilled' ? languageData.value : null;
             const skills = skillData.status === 'fulfilled' ? skillData.value : null;
+            const solvedStatsData = solvedStats.status === 'fulfilled' ? solvedStats.value : null;
+            const dailyProblem = dailyProblemData.status === 'fulfilled' ? dailyProblemData.value : null;
+            const badges = badgesData.status === 'fulfilled' ? badgesData.value : [];
 
             return {
                 status: "OK",
@@ -133,72 +140,17 @@ class LeetCodeAPI {
                 profile: {
                     name: profile?.name || username,
                     avatar: profile?.avatar || null,
-                    location: profile?.location || null,
-                    about: profile?.aboutMe || null,
-                    company: profile?.company || null,
-                    school: profile?.school || null,
-                    website: profile?.website || null,
-                    github: profile?.githubUrl || null,
-                    linkedin: profile?.linkedinUrl || null
+                    ranking: profile?.ranking || null,
+                    reputation: profile?.reputation || null,                    
                 },
-                submissions: profile?.recentSubmissionList || [],
+                solvedStats: solvedStatsData  || [],
                 contests: contests,
                 calendar_data: calendar,
-                language_stats: languages,
-                skill_stats: skills,
-                detailed_stats: {
-                    // Core Statistics
-                    total_solved: profile?.totalSolved || 211,
-                    easy_solved: profile?.easySolved || 82,
-                    medium_solved: profile?.mediumSolved || 118,
-                    hard_solved: profile?.hardSolved || 11,
-                    
-                    // Accurate Submission Data
-                    total_submissions: calendar?.totalSubmissions || 538,
-                    acceptance_rate: profile?.acceptanceRate || 96.79,
-                    
-                    // Contest Information
-                    contests_attended: contests?.attendedContestsCount || 7,
-                    contest_rating: Math.round(contests?.userContestRating?.rating || 1637),
-                    contest_ranking: contests?.userContestRanking?.currentGlobalRanking || 134138,
-                    contest_top_percentage: contests?.userContestRanking?.topPercentage || 18.64,
-                    
-                    // Ranking and Activity
-                    ranking: profile?.ranking || 601733,
-                    contribution_points: profile?.contributionPoints || 0,
-                    reputation: profile?.reputation || 0,
-                    
-                    // Calendar Activity - FIXED
-                    active_days: calendar?.totalActiveDays || 0,
-                    max_streak: calendar?.maxStreak || 0,
-                    current_streak: calendar?.currentStreak || 0,
-                    
-                    // Language Breakdown
-                    language_distribution: languages || {
-                        "C++": 207,
-                        "Python3": 61, 
-                        "Java": 44,
-                        "JavaScript": 13,
-                        "Kotlin": 4,
-                        "TypeScript": 2,
-                        "Python": 1,
-                        "C#": 1
-                    },
-                    
-                    // Skills Categorization
-                    skills_advanced: skills?.advanced || ["Dynamic Programming", "Backtracking", "Trie"],
-                    skills_intermediate: skills?.intermediate || ["Hash Table", "Math", "Greedy"],
-                    skills_fundamental: skills?.fundamental || ["Array", "String", "Sorting", "Two Pointers"],
-                    
-                    // Badges and Achievements
-                    badges: [
-                        { name: "50 Days Badge 2025", date: "2025-04-23" },
-                        { name: "50 Days Badge 2024", date: "2024-10-04" }
-                    ],
-                    
-                    // Recent Activity
-                    recent_submissions: profile?.recentSubmissionList?.slice(0, 10) || []
-                }
+                skills: skills || [],
+                badges: badges,
+                languageStats: languages,
+                dailyProblem: dailyProblem || null,
+                
             };
         } catch (error) {
             console.error(`LeetCode API Error for ${username}:`, error.message);
@@ -224,74 +176,79 @@ class LeetCodeAPI {
         }
     }
 
-    async fetchCalendarData(username) {
+    async fetchSolvedStats(username) {
+        try {
+            const response = await axios.get(`${this.alfaURL}/${username}/solved`, {
+                timeout: this.timeout,
+                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeetCode-Portfolio-API)' }
+            });
+
+            const data = response.data;
+            const totalSubmissions = data.totalSubmissionNum?.[0]?.submissions || 0;
+            const acceptedSubmissions = data.acSubmissionNum?.[0].submissions || 0;
+
+            let solvedStatsdata = {
+                totalSolved: data.solvedProblem || 0,
+                easySolved: data.easySolved || 0,
+                mediumSolved: data.mediumSolved || 0,
+                hardSolved: data.hardSolved || 0,
+                totalsubmissionsCount: totalSubmissions,
+                acceptance_rate: totalSubmissions > 0 
+            ? Math.round((acceptedSubmissions / totalSubmissions) * 100 * 100) / 100 
+            : 0,
+                totalSubmissions: data.totalSubmissionNum || [],
+                
+
+            }
+
+
+            return solvedStatsdata;
+        } catch (error) {
+            console.log(`Detailed stats fetch failed: ${error.message}`);
+            return null;
+        }
+    }
+    // working
+    async fetchCalendarData(username, year=2024) {
+        const source = "localApi";
         try {
             // Try primary source first
             let calendarResponse;
             try {
-                calendarResponse = await axios.get(`${this.alfaURL}/${username}/calendar`, {
+                calendarResponse = await axios.get(`${this.localApi}/userProfileCalendar?username=${username}&year=${year}`, {
                     timeout: this.timeout,
                     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeetCode-Portfolio-API)' }
+                    
                 });
             } catch (alfaError) {
                 console.log(`Primary calendar API failed, trying fallback: ${alfaError.message}`);
                 // Fallback to direct GraphQL if available
-                calendarResponse = await this.fetchCalendarFromGraphQL(username);
+                // calendarResponse = await this.fetchCalendarFromGraphQL(username);
+                source = "graphql"
             }
             
-            const calendarData = calendarResponse?.data || calendarResponse;
-            if (!calendarData) throw new Error('No calendar data available');
             
-            // Process submission calendar data
-            const submissionCalendar = calendarData.submissionCalendar || {};
-            
-            // Convert timestamps to dates and sort them
-            const sortedEntries = Object.entries(submissionCalendar)
-                .map(([timestamp, count]) => ({
-                    timestamp: parseInt(timestamp),
-                    date: new Date(parseInt(timestamp) * 1000),
-                    count: parseInt(count) || 0
-                }))
-                .filter(entry => entry.count > 0)
-                .sort((a, b) => a.timestamp - b.timestamp);
+                let calendardata = calendarResponse.data.data.matchedUser.userCalendar;
 
-            // Calculate statistics
-            const totalSubmissions = sortedEntries.reduce((sum, entry) => sum + entry.count, 0);
-            const totalActiveDays = sortedEntries.length;
-            
-            // Calculate streaks properly
-            const { currentStreak, maxStreak } = this.calculateStreaks(sortedEntries);
-            
-            // Generate daily activity for past year (for heatmap)
-            const dailyActivity = this.generateDailyActivity(submissionCalendar);
-            
-            // Create submissions history (chronological)
-            const submissionsHistory = sortedEntries.map(entry => ({
-                date: entry.date.toISOString().split('T')[0],
-                timestamp: entry.timestamp,
-                submissions: entry.count,
-                platform: 'leetcode'
-            }));
+                let totalActiveDays = calendardata.totalActiveDays || 0;
+                let maxstreak = calendardata?.streak || 0;
+                let activeYears = calendardata?.activeYears || [];
+                let totalSubmissions = this.getTotalSubmissionsCount(calendardata?.submissionCalendar || {});
+                let submmissionCalendar = this.getDateSubmissionList(calendardata?.submissionCalendar || {});
 
             return {
-                // Core metrics for heatmap
-                totalSubmissions,
+                [year]:{totalSubmissions,
                 totalActiveDays,
-                currentStreak,
-                maxStreak,
-                
-                // Data for visualization
-                dailyActivity,
-                submissionsHistory,
-                submissionCalendar,
+                maxstreak,
+                submmissionCalendar,
                 
                 // Metadata
-                dataSource: 'alfa-api',
+                dataSource: source,
                 lastUpdated: new Date().toISOString(),
                 yearRange: {
-                    start: dailyActivity[0]?.date || null,
-                    end: dailyActivity[dailyActivity.length - 1]?.date || null
-                }
+                    start: activeYears[0] || null,
+                    end: activeYears[activeYears.length - 1] || null
+                }}
             };
             
         } catch (error) {
@@ -301,59 +258,58 @@ class LeetCodeAPI {
         }
     }
 
-    calculateStreaks(sortedEntries) {
-        if (!sortedEntries || sortedEntries.length === 0) {
-            return { currentStreak: 0, maxStreak: 0 };
+    // working 
+    getTotalSubmissionsCount(submissionCalendar) {
+    if (!submissionCalendar) return 0;
+
+    // Parse JSON if input is a string
+    let calendarObj = submissionCalendar;
+    if (typeof submissionCalendar === "string") {
+        try {
+            calendarObj = JSON.parse(submissionCalendar);
+        } catch (err) {
+            console.error("Invalid submissionCalendar JSON:", err);
+            return 0;
         }
+    }
+    if (typeof calendarObj !== "object" || calendarObj === null) return 0;
 
-        let maxStreak = 0;
-        let currentStreakCount = 0;
-        let tempStreak = 1;
-        
-        const today = new Date();
-        const todayStr = today.toISOString().split('T')[0];
-        const yesterday = new Date(today);
-        yesterday.setDate(yesterday.getDate() - 1);
-        const yesterdayStr = yesterday.toISOString().split('T')[0];
-
-        // Calculate max streak by checking consecutive days
-        for (let i = 1; i < sortedEntries.length; i++) {
-            const prevDate = new Date(sortedEntries[i - 1].timestamp * 1000);
-            const currDate = new Date(sortedEntries[i].timestamp * 1000);
-            
-            // Check if dates are consecutive (difference of 1 day)
-            const daysDiff = Math.floor((currDate - prevDate) / (1000 * 60 * 60 * 24));
-            
-            if (daysDiff === 1) {
-                tempStreak++;
-            } else {
-                maxStreak = Math.max(maxStreak, tempStreak);
-                tempStreak = 1;
-            }
+    // Sum up all values
+    let total = 0;
+    for (const key in calendarObj) {
+        const count = parseInt(calendarObj[key], 10);
+        if (!isNaN(count) && count > 0) {
+            total += count;
         }
-        maxStreak = Math.max(maxStreak, tempStreak);
+    }
+    return total;
+    }
 
-        // Calculate current streak from most recent activity
-        const lastEntryDate = sortedEntries[sortedEntries.length - 1].date.toISOString().split('T')[0];
-        
-        if (lastEntryDate === todayStr || lastEntryDate === yesterdayStr) {
-            // Start from the most recent day and count backwards
-            for (let i = sortedEntries.length - 1; i > 0; i--) {
-                const currDate = new Date(sortedEntries[i].timestamp * 1000);
-                const prevDate = new Date(sortedEntries[i - 1].timestamp * 1000);
-                
-                const daysDiff = Math.floor((currDate - prevDate) / (1000 * 60 * 60 * 24));
-                
-                if (daysDiff === 1) {
-                    currentStreakCount++;
-                } else {
-                    break;
-                }
-            }
-            currentStreakCount++; // Include the starting day
+    getDateSubmissionList(submissionCalendar) {
+    if (!submissionCalendar) return [];
+
+    // Parse JSON if input is a string
+    let calendarObj = submissionCalendar;
+    if (typeof submissionCalendar === "string") {
+        try {
+            calendarObj = JSON.parse(submissionCalendar);
+        } catch (err) {
+            console.error("Invalid submissionCalendar JSON:", err);
+            return [];
         }
+    }
+    if (typeof calendarObj !== "object" || calendarObj === null) return [];
 
-        return { currentStreak: currentStreakCount, maxStreak };
+    // Convert each timestamp to date and build result list
+    return Object.entries(calendarObj)
+        .map(([timestamp, count]) => ({
+            date: new Date(parseInt(timestamp, 10) * 1000)
+                    .toISOString()
+                    .split("T")[0],
+            submissionCount: parseInt(count, 10)
+        }))
+        .filter(item => item.submissionCount > 0)
+        .sort((a, b) => a.date.localeCompare(b.date));
     }
 
     generateDailyActivity(submissionCalendar) {
@@ -472,11 +428,11 @@ class LeetCodeAPI {
 
     async fetchLanguageStats(username) {
         try {
-            const response = await axios.get(`${this.alfaURL}/${username}/languageStats`, {
+            const response = await axios.get(`${this.alfaURL}/languageStats?username=${username}`, {
                 timeout: this.timeout,
                 headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeetCode-Portfolio-API)' }
             });
-            return response.data.languageProblemCount || null;
+            return response.data.matchedUser || null;
         } catch (error) {
             console.log(`Language stats fetch failed: ${error.message}`);
             return null;
@@ -485,29 +441,48 @@ class LeetCodeAPI {
 
     async fetchSkillStats(username) {
         try {
-            const response = await axios.get(`${this.alfaURL}/${username}/skillStats`, {
+            const response = await axios.get(`${this.alfaURL}/skillStats/${username}`, {
                 timeout: this.timeout,
                 headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeetCode-Portfolio-API)' }
             });
             
-            const skills = response.data;
-            return {
-                advanced: skills.advanced || ["Dynamic Programming", "Backtracking", "Trie"],
-                intermediate: skills.intermediate || ["Hash Table", "Math", "Greedy"], 
-                fundamental: skills.fundamental || ["Array", "String", "Sorting", "Two Pointers"]
-            };
+            const skills = response.data.data.matchedUser.tagProblemCounts || [];
+            return skills;
         } catch (error) {
             console.log(`Skill stats fetch failed: ${error.message}`);
             return null;
         }
     }
+
+    async getDailyProblem(){
+        try {
+            const response = await axios.get(`${this.alfaURL}/daily`, {
+                timeout: this.timeout,
+                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeetCode-Portfolio-API)' }
+            });
+            
+            // const skills = response.data.data.matchedUser.tagProblemCounts || [];
+            return response.data;
+        } catch (error) {
+            console.log(`Leetcode Daily problem Fetch failed: ${error.message}`);
+            return null;
+        }
+    }
+
+    async getBadges(username) {
+        try {
+            const response = await axios.get(`${this.alfaURL}/${username}/badges`, {
+                timeout: this.timeout,
+                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeetCode-Portfolio-API)' }
+            });
+            
+            return response.data || [];
+        } catch (error) {
+            console.log(`Leetcode Badges Fetch failed: ${error.message}`);
+            return [];
+        }
+    }
 }
-
-
-
-
-
-
 
 class CodeForcesAPI {
     constructor() {
