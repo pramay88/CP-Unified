@@ -576,161 +576,376 @@ async fetchSubmissionCalendarData(username, defaultYear = 2024) {
 }
 
 class CodeForcesAPI {
-    constructor() {
-        this.baseURL = 'https://codeforces.com/api';
-        this.timeout = 8000;
+  constructor() {
+    this.baseURL = 'https://codeforces.com/api';
+    this.timeout = 8000;
+  }
+
+  async fetchWithRetry(url) {
+    try {
+      const response = await axios.get(url, {
+        timeout: this.timeout,
+        headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
+      });
+      return response;
+    } catch (error) {
+      // Note: original code referenced i/retries; simplifying to single attempt log
+      console.log(`Fetch failed for ${url}: ${error.message}`);
+      throw error;
+    }
+  }
+
+async getUserData(handle) {
+  try {
+    const [userInfo, ratings, submissions, contestData] = await Promise.allSettled([
+      this.fetchWithRetry(`${this.baseURL}/user.info?handles=${handle}`),
+      this.fetchWithRetry(`${this.baseURL}/user.rating?handle=${handle}`),
+      this.fetchWithRetry(`${this.baseURL}/user.status?handle=${handle}&from=1&count=10000`),
+      this.fetchContestData(handle)
+    ]);
+
+    const userData = userInfo.status === 'fulfilled' ? userInfo.value.data?.result?.[0] : null;
+    const ratingsData = ratings.status === 'fulfilled' ? ratings.value.data?.result : null;
+    const submissionsData = submissions.status === 'fulfilled' ? submissions.value.data?.result : null;
+    const contests = contestData.status === 'fulfilled' ? contestData.value : null;
+
+    if (!userData) {
+      return { 
+        status: "FAILED",
+        timestamp: new Date().toISOString(),
+        platform: "codeforces",
+        username: handle,
+        error: "User not found"
+      };
     }
 
-    async fetchWithRetry(url) {
-        try {
-            const response = await axios.get(url, {
-                timeout: this.timeout,
-                headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
-            });
-            return response;
-        } catch (error) {
-            console.log(`Attempt ${i + 1} failed for ${url}: ${error.message}`);
-            if (i === retries - 1) throw error;
-            // await this.sleep(delay * Math.pow(2, i));
-        }
-    }
+    // Build LeetCode-style calendar from CF submissions
+    const { calendarAll, perYearNodes } =
+      this.buildLeetCodeStyleCalendar(submissionsData || []);
 
-    async getUserData(handle) {
-        try {
-            // Removed: await this.sleep(400);
-            
-            const [userInfo, ratings, submissions, contestData] = await Promise.allSettled([
-                this.fetchWithRetry(`${this.baseURL}/user.info?handles=${handle}`),
-                this.fetchWithRetry(`${this.baseURL}/user.rating?handle=${handle}`),
-                this.fetchWithRetry(`${this.baseURL}/user.status?handle=${handle}&from=1&count=10000`),
-                this.fetchContestData(handle)
-            ]);
+    // Calendar block packed under data.calendar_data
+    const calendar_data = {
+      totalSubmissions: calendarAll.totalSubmissions,
+      totalActiveDays: calendarAll.totalActiveDays,
+      maxstreak: calendarAll.maxstreak,
+    //   submissionCalendar: calendarAll.submissionCalendar, // JSON string with epoch-ms day keys
+      submission_calendar_data: calendarAll.submission_calendar_data, // parsed/day-list if you produce it
+      activeYears: calendarAll.activeYears,
+      yearRange: calendarAll.yearRange,
+      byYear: perYearNodes // { [year]: { totalSubmissions, totalActiveDays, maxstreak, submissionCalendar, submission_calendar_data, yearRange } }
+    };
 
-            const userData = userInfo.status === 'fulfilled' ? userInfo.value.data?.result?.[0] : null;
-            const ratingsData = ratings.status === 'fulfilled' ? ratings.value.data?.result : null;
-            const submissionsData = submissions.status === 'fulfilled' ? submissions.value.data?.result : null;
-            const contests = contestData.status === 'fulfilled' ? contestData.value : null;
+    // Solved stats as before
+    const solvedStats = this.calculateDetailedStats(userData, ratingsData, submissionsData);
 
-            if (!userData) {
-                return { 
-                    status: "FAILED", 
-                    platform: "codeforces", 
-                    username: handle, 
-                    error: "User not found" 
-                };
-            }
-
-            return {
-                status: "OK",
-                platform: "codeforces",
-                username: handle,
-                profile: userData,
-                contests: contests,
-                solvedStats: this.calculateDetailedStats(userData, ratingsData, submissionsData)
-            };
-        } catch (error) {
-            console.error(`CodeForces API Error for ${handle}:`, error.message);
-            return { 
-                status: "FAILED", 
-                platform: "codeforces", 
-                username: handle, 
-                error: error.message 
-            };
-        }
-    }
-
-    async fetchContestData(handle) {
-        try {
-            const response = await this.fetchWithRetry(`${this.baseURL}/user.rating?handle=${handle}`);
-            const ratingsData = response.data?.result || [];
-            
-            if (ratingsData.length === 0) {
-                return {
-                    contestsAttended: 0,
-                    recentContests: [],
-                    bestRank: null,
-                    worstRank: null,
-                    maxRatingGain: 0,
-                    maxRatingLoss: 0,
-                    ratingProgression: []
-                };
-            }
-
-            const recentContests = ratingsData.slice(-10).map(contest => ({
-                contestId: contest.contestId,
-                contestName: contest.contestName,
-                rank: contest.rank,
-                oldRating: contest.oldRating,
-                newRating: contest.newRating,
-                ratingChange: contest.newRating - contest.oldRating,
-                participationTime: new Date(contest.ratingUpdateTimeSeconds * 1000).toISOString()
-            }));
-
-            return {
-                contestsAttended: ratingsData.length,
-                recentContests: recentContests,
-                bestRank: Math.min(...ratingsData.map(c => c.rank)),
-                worstRank: Math.max(...ratingsData.map(c => c.rank)),
-                maxRatingGain: Math.max(...ratingsData.map(c => c.newRating - c.oldRating)),
-                maxRatingLoss: Math.min(...ratingsData.map(c => c.newRating - c.oldRating)),
-                ratingProgression: ratingsData.map(c => ({
-                    date: new Date(c.ratingUpdateTimeSeconds * 1000).toISOString(),
-                    rating: c.newRating,
-                    contest: c.contestName
-                }))
-            };
-        } catch (error) {
-            console.log(`Codeforces contest data fetch failed: ${error.message}`);
-            return null;
-        }
-    }
-
-    calculateDetailedStats(userData, ratingsData, submissionsData) {
-        const stats = {
-            current_rating: userData.rating || 0,
-            max_rating: userData.maxRating || 0,
-            rank: userData.rank || 'Unrated',
-            max_rank: userData.maxRank || 'Unrated',
-            contribution: userData.contribution || 0,
-            problems_solved: 0,
-            contests_participated: ratingsData ? ratingsData.length : 0,
-            language_stats: {},
-            verdict_stats: {},
-            difficulty_distribution: {},
-            yearly_submissions: {}
-        };
-
-        if (submissionsData) {
-            const acceptedProblems = new Set();
-            
-            submissionsData.forEach(submission => {
-                const year = new Date(submission.creationTimeSeconds * 1000).getFullYear();
-                stats.yearly_submissions[year] = (stats.yearly_submissions[year] || 0) + 1;
-                
-                stats.language_stats[submission.programmingLanguage] = 
-                    (stats.language_stats[submission.programmingLanguage] || 0) + 1;
-                
-                stats.verdict_stats[submission.verdict] = 
-                    (stats.verdict_stats[submission.verdict] || 0) + 1;
-
-                if (submission.verdict === 'OK') {
-                    acceptedProblems.add(`${submission.problem.contestId}-${submission.problem.index}`);
-                    
-                    const rating = submission.problem.rating;
-                    if (rating) {
-                        const bucket = Math.floor(rating / 100) * 100;
-                        stats.difficulty_distribution[bucket] = 
-                            (stats.difficulty_distribution[bucket] || 0) + 1;
-                    }
-                }
-            });
-            
-            stats.problems_solved = acceptedProblems.size;
-        }
-
-        return stats;
-    }
+    // Final response shape (everything inside data)
+    return {
+      status: "OK",
+      timestamp: new Date().toISOString(),
+      platform: "codeforces",
+      username: handle,
+        profile: userData,
+        contests : contests,
+        solvedStats: solvedStats,
+        calendar_data: calendar_data
+    };
+  } catch (error) {
+    console.error(`CodeForces API Error for ${handle}:`, error.message);
+    return { 
+      status: "FAILED",
+      timestamp: new Date().toISOString(),
+      platform: "codeforces",
+      username: handle,
+      error: error.message
+    };
+  }
 }
+
+
+
+  async fetchContestData(handle) {
+    try {
+      const response = await this.fetchWithRetry(`${this.baseURL}/user.rating?handle=${handle}`);
+      const ratingsData = response.data?.result || [];
+      
+      if (ratingsData.length === 0) {
+        return {
+          contestsAttended: 0,
+          recentContests: [],
+          bestRank: null,
+          worstRank: null,
+          maxRatingGain: 0,
+          maxRatingLoss: 0,
+          ratingProgression: []
+        };
+      }
+
+      const recentContests = ratingsData.slice(-10).map(contest => ({
+        contestId: contest.contestId,
+        contestName: contest.contestName,
+        rank: contest.rank,
+        oldRating: contest.oldRating,
+        newRating: contest.newRating,
+        ratingChange: contest.newRating - contest.oldRating,
+        participationTime: new Date(contest.ratingUpdateTimeSeconds * 1000).toISOString()
+      }));
+
+      return {
+        contestsAttended: ratingsData.length,
+        recentContests: recentContests,
+        bestRank: Math.min(...ratingsData.map(c => c.rank)),
+        worstRank: Math.max(...ratingsData.map(c => c.rank)),
+        maxRatingGain: Math.max(...ratingsData.map(c => c.newRating - c.oldRating)),
+        maxRatingLoss: Math.min(...ratingsData.map(c => c.newRating - c.oldRating)),
+        ratingProgression: ratingsData.map(c => ({
+          date: new Date(c.ratingUpdateTimeSeconds * 1000).toISOString(),
+          rating: c.newRating,
+          contest: c.contestName
+        }))
+      };
+    } catch (error) {
+      console.log(`Codeforces contest data fetch failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  calculateDetailedStats(userData, ratingsData, submissionsData) {
+    const stats = {
+      current_rating: userData.rating || 0,
+      max_rating: userData.maxRating || 0,
+      rank: userData.rank || 'Unrated',
+      max_rank: userData.maxRank || 'Unrated',
+      contribution: userData.contribution || 0,
+      problems_solved: 0,
+      contests_participated: ratingsData ? ratingsData.length : 0,
+      language_stats: {},
+      verdict_stats: {},
+      difficulty_distribution: {},
+      yearly_submissions: {}
+    };
+
+    if (submissionsData) {
+      const acceptedProblems = new Set();
+      
+      submissionsData.forEach(submission => {
+        const year = new Date(submission.creationTimeSeconds * 1000).getFullYear();
+        stats.yearly_submissions[year] = (stats.yearly_submissions[year] || 0) + 1;
+        
+        stats.language_stats[submission.programmingLanguage] = 
+          (stats.language_stats[submission.programmingLanguage] || 0) + 1;
+        
+        stats.verdict_stats[submission.verdict] = 
+          (stats.verdict_stats[submission.verdict] || 0) + 1;
+
+        if (submission.verdict === 'OK') {
+          acceptedProblems.add(`${submission.problem.contestId}-${submission.problem.index}`);
+          
+          const rating = submission.problem.rating;
+          if (rating) {
+            const bucket = Math.floor(rating / 100) * 100;
+            stats.difficulty_distribution[bucket] = 
+              (stats.difficulty_distribution[bucket] || 0) + 1;
+          }
+        }
+      });
+      
+      stats.problems_solved = acceptedProblems.size;
+    }
+
+    return stats;
+  }
+  
+
+  // ===== NEW: Build LeetCode-like submission calendar =====
+  buildSubmissionCalendarDataFromCF(submissions) {
+    // Map dayStartMs -> count
+    const dayCounts = new Map(); // all-time
+    // Per year breakdown
+    const perYearDayCounts = new Map(); // year -> Map(dayStartMs -> count)
+
+    for (const s of submissions) {
+      if (!s?.creationTimeSeconds) continue;
+      const ms = s.creationTimeSeconds * 1000;
+      const d = new Date(ms);
+      // Normalize to UTC midnight
+      const dayStartMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+      const year = d.getUTCFullYear();
+
+      dayCounts.set(dayStartMs, (dayCounts.get(dayStartMs) || 0) + 1);
+
+      if (!perYearDayCounts.has(year)) perYearDayCounts.set(year, new Map());
+      const ym = perYearDayCounts.get(year);
+      ym.set(dayStartMs, (ym.get(dayStartMs) || 0) + 1);
+    }
+
+    // Helpers
+    const mapToJsonString = (m) => {
+      const obj = {};
+      for (const [k, v] of m.entries()) {
+        obj[String(k)] = v;
+      }
+      return JSON.stringify(obj);
+    };
+
+    const computeStreakFromDays = (m) => {
+      if (m.size === 0) return 0;
+      const days = Array.from(m.keys()).sort((a, b) => a - b);
+      let maxStreak = 1;
+      let curStreak = 1;
+      for (let i = 1; i < days.length; i++) {
+        const prev = days[i - 1];
+        const curr = days[i];
+        if (curr === prev + 24 * 60 * 60 * 1000) {
+          curStreak += 1;
+        } else {
+          if (curStreak > maxStreak) maxStreak = curStreak;
+          curStreak = 1;
+        }
+      }
+      if (curStreak > maxStreak) maxStreak = curStreak;
+      return maxStreak;
+    };
+
+    // All-time aggregates
+    const activeYears = Array.from(perYearDayCounts.keys()).sort((a, b) => a - b);
+    const totalActiveDaysAll = dayCounts.size;
+    const streakAll = computeStreakFromDays(dayCounts);
+    const submissionCalendarAll = mapToJsonString(dayCounts);
+
+    // Per-year nodes
+    const byYear = {};
+    for (const year of activeYears) {
+      const ym = perYearDayCounts.get(year);
+      const totalActiveDays = ym.size;
+      const streak = computeStreakFromDays(ym);
+      const submissionCalendar = mapToJsonString(ym);
+      byYear[year] = {
+        totalActiveDays,
+        streak,
+        // Match LeetCode key name exactly: submissionCalendar
+        submissionCalendar,
+        // Convenience: total submissions for year (sum of counts)
+        totalSubmissions: Array.from(ym.values()).reduce((a, b) => a + b, 0),
+        yearRange: { start: year, end: year }
+      };
+    }
+
+    // Return a LeetCode-like shape with multi-year convenience
+    return {
+      activeYears,
+      totalActiveDays: totalActiveDaysAll,
+      streak: streakAll,
+      submissionCalendar: submissionCalendarAll,
+      totalSubmissions: Array.from(dayCounts.values()).reduce((a, b) => a + b, 0),
+      yearRange: activeYears.length
+        ? { start: activeYears[0], end: activeYears[activeYears.length - 1] }
+        : { start: null, end: null },
+      byYear // per-year breakdown similar to querying LeetCode by specific year
+    };
+  }
+  // Builds LeetCode-like calendar from Codeforces submissions
+buildLeetCodeStyleCalendar(submissions) {
+  // dayStartMs -> count (Map for all-time)
+  const allDayCounts = new Map();
+  // year -> Map(dayStartMs -> count)
+  const perYear = new Map();
+
+  for (const s of submissions || []) {
+    const t = s?.creationTimeSeconds;
+    if (!t) continue;
+    const d = new Date(t * 1000);
+    const y = d.getUTCFullYear();
+    const dayStartMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+
+    allDayCounts.set(dayStartMs, (allDayCounts.get(dayStartMs) || 0) + 1);
+
+    if (!perYear.has(y)) perYear.set(y, new Map());
+    const ym = perYear.get(y);
+    ym.set(dayStartMs, (ym.get(dayStartMs) || 0) + 1);
+  }
+
+  const mapToJSONString = (m) => {
+    // Keys must be strings in the JSON; values are integers
+    const obj = {};
+    for (const [k, v] of m.entries()) {
+  // Convert epoch ms (e.g., 1321315200000) to YYYY-MM-DD string
+  const d = new Date(Number(k));
+  if (!isNaN(d.getTime())) {
+    const dateStr = d.toISOString().slice(0, 10); // "YYYY-MM-DD"
+    obj[dateStr] = v;
+  } else {
+    obj[String(k)] = v; // fallback for non-date keys
+  }
+}
+   
+    return JSON.stringify(obj);
+  };
+
+  const computeLongestStreak = (m) => {
+    if (m.size === 0) return 0;
+    const days = Array.from(m.keys()).sort((a, b) => a - b);
+    let best = 1, cur = 1;
+    const oneDay = 24 * 60 * 60 * 1000;
+    for (let i = 1; i < days.length; i++) {
+      if (days[i] === days[i - 1] + oneDay) cur += 1;
+      else { if (cur > best) best = cur; cur = 1; }
+    }
+    if (cur > best) best = cur;
+    return best;
+  };
+
+  const activeYears = Array.from(perYear.keys()).sort((a, b) => a - b);
+
+  // All-time summary (mirrors LeetCode userCalendar aggregated style)
+  const totalActiveDays = allDayCounts.size;
+  const maxstreak = computeLongestStreak(allDayCounts); // name aligned with your LeetCode code
+  const totalSubmissions = Array.from(allDayCounts.values()).reduce((a, b) => a + b, 0);
+  const submissionCalendar = mapToJSONString(allDayCounts);
+
+  // Per-year nodes: same variable names as in your LeetCode function
+  const perYearNodes = {};
+  for (const y of activeYears) {
+    const ym = perYear.get(y);
+    const y_totalActiveDays = ym.size;
+    const y_maxstreak = computeLongestStreak(ym);
+    const y_totalSubmissions = Array.from(ym.values()).reduce((a, b) => a + b, 0);
+    const y_submissionCalendar = mapToJSONString(ym);
+
+    // Same names you used in LeetCode return shape
+    perYearNodes[y] = {
+      totalSubmissions: y_totalSubmissions,
+      totalActiveDays: y_totalActiveDays,
+      maxstreak: y_maxstreak,
+      // If your LeetCode function exposes 'submission_calendar_data' as parsed map, keep it:
+      submission_calendar_data: this.getDateSubmissionList
+        ? this.getDateSubmissionList(JSON.parse(y_submissionCalendar))
+        : undefined,
+      submissionCalendar: y_submissionCalendar,
+      yearRange: { start: y, end: y }
+    };
+  }
+
+  // Top-level multi-year, same names
+  const calendarAll = {
+    totalSubmissions,
+    totalActiveDays,
+    maxstreak,
+    // If you produce submission_calendar_data in LeetCode as parsed object, add it too:
+    submission_calendar_data: this.getDateSubmissionList
+      ? this.getDateSubmissionList(JSON.parse(submissionCalendar))
+      : undefined,
+    submissionCalendar, // JSON string like {"1293494400000":7,...}
+    activeYears,
+    yearRange: activeYears.length
+      ? { start: activeYears[0], end: activeYears[activeYears.length - 1] }
+      : { start: null, end: null }
+  };
+
+  return { calendarAll, perYearNodes };
+}
+
+}
+
 
 
 
@@ -740,127 +955,145 @@ class CodeChefAPI {
     }
 
     async getUserData(handle) {
-        try {
-            console.log(`Fetching CodeChef data for: ${handle}`);
-            
-            const response = await axios.get(`https://www.codechef.com/users/${handle}`, {
-                timeout: this.timeout,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Cache-Control': 'no-cache',
-                    'Pragma': 'no-cache',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Upgrade-Insecure-Requests': '1'
-                }
-            });
+  try {
+    console.log(`Fetching CodeChef data for: ${handle}`);
 
-            if (response.status === 200) {
-                const htmlData = response.data;
-                const dom = new JSDOM(htmlData);
-                const document = dom.window.document;
+    const response = await axios.get(`https://www.codechef.com/users/${handle}`, {
+      timeout: this.timeout,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Upgrade-Insecure-Requests': '1'
+      }
+    });
 
-                // Extract problems solved using multiple methods
-                const problemsSolved = this.extractProblemsSolved(document, htmlData);
-
-                const contestData = this.extractContestData(document, htmlData);
-
-                // Extract rating data
-                let ratingData = null;
-                let highestRating = 0;
-                try {
-                    const allRatingStart = htmlData.search("var all_rating = ") + "var all_rating = ".length;
-                    const allRatingEnd = htmlData.search("var current_user_rating =") - 6;
-                    if (allRatingStart > -1 && allRatingEnd > allRatingStart) {
-                        ratingData = JSON.parse(htmlData.substring(allRatingStart, allRatingEnd));
-                        if (ratingData && ratingData.length > 0) {
-                            highestRating = Math.max(...ratingData.map(r => r.rating || 0));
-                        }
-                    }
-                } catch (e) {
-                    console.log('Could not parse rating data:', e.message);
-                }
-
-                // Extract profile information
-                const userDetailsContainer = document.querySelector(".user-details-container");
-                const ratingNumber = document.querySelector(".rating-number");
-                const ratingRanks = document.querySelector(".rating-ranks");
-                const userCountryFlag = document.querySelector(".user-country-flag");
-                const userCountryName = document.querySelector(".user-country-name");
-                const ratingElement = document.querySelector(".rating");
-                const badges = this.extractBadgesData(document, htmlData);
-
-                const currentRating = parseInt(ratingNumber?.textContent?.replace(/[^\d]/g, '')) || 0;
-                if (highestRating === 0) {
-                    highestRating = currentRating;
-                }
-
-                return {
-                    status: "OK",
-                    platform: "codechef",
-                    username: handle,
-                    profile: {
-                        name: this.extractName(userDetailsContainer) || handle,
-                        // countryFlag: userCountryFlag?.src || null,
-                        // countryName: userCountryName?.textContent?.trim() || null,
-                        username: handle,
-                        avatar: userDetailsContainer?.querySelector('img')?.src || null,
-                        globalRank: this.extractRank(ratingRanks, 'global') || 0,
-                        countryRank: this.extractRank(ratingRanks, 'country') || 0,
-                        stars: ratingElement?.textContent?.trim() || "unrated",
-
-                    },
-                    solvedStats: {
-                        totalSolved: problemsSolved,
-                        
-                    },
-                    contests: {
-                        current_rating: currentRating,
-                        highest_rating: highestRating,
-                        division: this.getDivisionFromRating(currentRating),
-                        contestData
-                    },
-                    badges: {
-                        totalBadges: badges.length,
-                        badges: badges,
-                        stats: this.categorizeBadgeStats(badges)
-                    }
-
-                };
-            } else {
-                throw new Error(`HTTP ${response.status}: Could not fetch profile`);
-            }
-        } catch (error) {
-            console.error(`CodeChef API Error for ${handle}:`, error.message);
-            
-            if (error.response?.status === 404) {
-                return {
-                    status: "FAILED",
-                    platform: "codechef",
-                    username: handle,
-                    error: "User not found on CodeChef"
-                };
-            } else if (error.response?.status === 429) {
-                return {
-                    status: "RATE_LIMITED",
-                    platform: "codechef",
-                    username: handle,
-                    error: "Rate limited by CodeChef. Please try again later."
-                };
-            } else {
-                return {
-                    status: "FAILED",
-                    platform: "codechef",
-                    username: handle,
-                    error: error.message
-                };
-            }
-        }
+    if (response.status !== 200) {
+      throw new Error(`HTTP ${response.status}: Could not fetch profile`);
     }
+
+    const htmlData = response.data;
+    const dom = new JSDOM(htmlData);
+    const document = dom.window.document;
+
+    const problemsSolved = this.extractProblemsSolved(document, htmlData);
+    const contestData = this.extractContestData(document, htmlData);
+
+    // Rating data
+    let ratingData = null;
+    let highestRating = 0;
+    try {
+      const allRatingStart = htmlData.search("var all_rating = ") + "var all_rating = ".length;
+      const allRatingEnd = htmlData.search("var current_user_rating =") - 6;
+      if (allRatingStart > -1 && allRatingEnd > allRatingStart) {
+        ratingData = JSON.parse(htmlData.substring(allRatingStart, allRatingEnd));
+        if (ratingData && ratingData.length > 0) {
+          highestRating = Math.max(...ratingData.map(r => r.rating || 0));
+        }
+      }
+    } catch (e) {
+      console.log('Could not parse rating data:', e.message);
+    }
+
+    // Profile info
+    const userDetailsContainer = document.querySelector(".user-details-container");
+    const ratingNumber = document.querySelector(".rating-number");
+    const ratingRanks = document.querySelector(".rating-ranks");
+    const ratingElement = document.querySelector(".rating");
+    const badges = this.extractBadgesData(document, htmlData);
+
+    const currentRating = parseInt(ratingNumber?.textContent?.replace(/[^\d]/g, '')) || 0;
+    if (highestRating === 0) highestRating = currentRating;
+
+    // ==== NEW: Build calendar_data ====
+    // Try to extract a daily heatmap object from HTML; if not, fall back to minimal activity from rating progression (contests days).
+    let calendar_data;
+    try {
+      const dailyObj = this.extractDailyHeatmapObject(htmlData);
+      if (dailyObj) {
+        calendar_data = this.buildLeetCodeStyleCalendarFromCodeChef(dailyObj);
+      } else {
+        // Fallback: derive from contest end dates (very sparse, but better than empty)
+        const dayCounts = {};
+        const ratingProg = contestData?.ratingProgression || [];
+        for (const r of ratingProg) {
+          if (!r?.date) continue;
+          const d = new Date(r.date);
+          if (isNaN(d.getTime())) continue;
+          const dayStartMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+          dayCounts[String(dayStartMs)] = (dayCounts[String(dayStartMs)] || 0) + 1;
+        }
+        calendar_data = this.buildLeetCodeStyleCalendarFromCodeChef(dayCounts);
+      }
+    } catch (e) {
+      console.log('calendar_data build failed:', e.message);
+      // Safe empty structure
+      calendar_data = {
+        totalSubmissions: 0,
+        totalActiveDays: 0,
+        maxstreak: 0,
+        submissionCalendar: JSON.stringify({}),
+        submission_calendar_data: this.getDateSubmissionList ? this.getDateSubmissionList({}) : undefined,
+        activeYears: [],
+        yearRange: { start: null, end: null },
+        byYear: {}
+      };
+    }
+
+    return {
+      profile: {
+        name: this.extractName(userDetailsContainer) || handle,
+        username: handle,
+        avatar: userDetailsContainer?.querySelector('img')?.src || null,
+        globalRank: this.extractRank(ratingRanks, 'global') || 0,
+        countryRank: this.extractRank(ratingRanks, 'country') || 0,
+        stars: ratingElement?.textContent?.trim() || "unrated"
+      },
+      solvedStats: {
+        totalSolved: problemsSolved
+      },
+      contests: {
+        current_rating: currentRating,
+        highest_rating: highestRating,
+        division: this.getDivisionFromRating(currentRating),
+        contestData
+      },
+      badges: {
+        totalBadges: badges.length,
+        badges: badges,
+        stats: this.categorizeBadgeStats(badges)
+      },
+      // Place the LeetCode-like calendar under data.calendar_data
+      calendar_data
+    };
+  } catch (error) {
+    console.error(`CodeChef API Error for ${handle}:`, error.message);
+
+    const failure = {
+      status: "FAILED",
+      timestamp: new Date().toISOString(),
+      platform: "codechef",
+      username: handle,
+      error: error.message
+    };
+
+    if (error.response?.status === 404) {
+      failure.error = "User not found on CodeChef";
+    } else if (error.response?.status === 429) {
+      failure.status = "RATE_LIMITED";
+      failure.error = "Rate limited by CodeChef. Please try again later.";
+    }
+
+    return failure;
+  }
+}
+
 
     extractProblemsSolved(document, htmlData) {
         console.log('Extracting problems solved using multiple methods...');
@@ -1324,6 +1557,169 @@ categorizeBadgeStats(badges) {
         byLevel: levels
     };
 }
+
+// Inside class CodeChefAPI
+buildLeetCodeStyleCalendarFromCodeChef(heatmapJsonLike) {
+  // Accepts one of:
+  // - direct JSON object: { "1293494400000": 7, ... }
+  // - or nested object like { "2024-01-01": { value: 2 }, ... }
+  // The CodeChef page varies; we’ll normalize into a Map(dayStartMs -> count).
+
+  const dayCounts = new Map();           // all-time map
+  const perYearDayCounts = new Map();    // year -> Map(dayStartMs -> count)
+
+  const tryParseCount = (val) => {
+    if (typeof val === 'number') return val;
+    if (val && typeof val === 'object') {
+      // Try common keys
+      if (typeof val.value === 'number') return val.value;
+      if (typeof val.solved === 'number') return val.solved;
+      if (typeof val.count === 'number') return val.count;
+      // sometimes strings
+      if (val.value) return parseInt(val.value) || 0;
+      if (val.solved) return parseInt(val.solved) || 0;
+      if (val.count) return parseInt(val.count) || 0;
+    }
+    if (typeof val === 'string') {
+      const n = parseInt(val);
+      return Number.isFinite(n) ? n : 0;
+    }
+    return 0;
+  };
+
+  const addDay = (dayStartMs, count) => {
+    if (!count) return;
+    dayCounts.set(dayStartMs, (dayCounts.get(dayStartMs) || 0) + count);
+    const d = new Date(dayStartMs);
+    const y = d.getUTCFullYear();
+    if (!perYearDayCounts.has(y)) perYearDayCounts.set(y, new Map());
+    const ym = perYearDayCounts.get(y);
+    ym.set(dayStartMs, (ym.get(dayStartMs) || 0) + count);
+  };
+
+  // Normalize input into dayStartMs -> count
+  if (heatmapJsonLike && typeof heatmapJsonLike === 'object') {
+    for (const [k, rawVal] of Object.entries(heatmapJsonLike)) {
+      const count = tryParseCount(rawVal);
+
+      // Case 1: key is epoch-ms string
+      if (/^\d{12,}$/.test(k)) {
+        const dayStartMs = Number(k);
+        addDay(dayStartMs, count);
+        continue;
+      }
+      // Case 2: key is ISO-like date "YYYY-MM-DD" (or similar)
+      // We convert to UTC midnight
+      const date = new Date(k);
+      if (!isNaN(date.getTime())) {
+        const dayStartMs = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+        addDay(dayStartMs, count);
+        continue;
+      }
+      // Otherwise ignore
+    }
+  }
+
+  const mapToJSONString = (m) => {
+    const obj = {};
+    for (const [k, v] of m.entries()) {
+  // Convert epoch ms (e.g., 1321315200000) to YYYY-MM-DD string
+  const d = new Date(Number(k));
+  if (!isNaN(d.getTime())) {
+    const dateStr = d.toISOString().slice(0, 10); // "YYYY-MM-DD"
+    obj[dateStr] = v;
+  } else {
+    obj[String(k)] = v; // fallback for non-date keys
+  }
+}
+
+    return JSON.stringify(obj);
+  };
+
+  const computeLongestStreak = (m) => {
+    if (m.size === 0) return 0;
+    const oneDay = 24 * 60 * 60 * 1000;
+    const days = Array.from(m.keys()).sort((a, b) => a - b);
+    let best = 1, cur = 1;
+    for (let i = 1; i < days.length; i++) {
+      if (days[i] === days[i - 1] + oneDay) cur += 1;
+      else { if (cur > best) best = cur; cur = 1; }
+    }
+    return Math.max(best, cur);
+  };
+
+  const activeYears = Array.from(perYearDayCounts.keys()).sort((a, b) => a - b);
+  const totalActiveDays = dayCounts.size;
+  const maxstreak = computeLongestStreak(dayCounts);
+  const totalSubmissions = Array.from(dayCounts.values()).reduce((a, b) => a + b, 0);
+  const submissionCalendar = mapToJSONString(dayCounts);
+
+  const byYear = {};
+  for (const y of activeYears) {
+    const ym = perYearDayCounts.get(y);
+    const ySubmissionCalendar = mapToJSONString(ym);
+    byYear[y] = {
+      totalSubmissions: Array.from(ym.values()).reduce((a, b) => a + b, 0),
+      totalActiveDays: ym.size,
+      maxstreak: computeLongestStreak(ym),
+      submissionCalendar: ySubmissionCalendar,
+      submission_calendar_data: this.getDateSubmissionList
+        ? this.getDateSubmissionList(JSON.parse(ySubmissionCalendar))
+        : undefined,
+      yearRange: { start: y, end: y }
+    };
+  }
+
+  return {
+    totalSubmissions,
+    totalActiveDays,
+    maxstreak,
+    submissionCalendar, // JSON string like {"1293494400000":7,...}
+    submission_calendar_data: this.getDateSubmissionList
+      ? this.getDateSubmissionList(JSON.parse(submissionCalendar))
+      : undefined,
+    activeYears,
+    yearRange: activeYears.length
+      ? { start: activeYears[0], end: activeYears[activeYears.length - 1] }
+      : { start: null, end: null },
+    byYear
+  };
+}
+
+// Try to extract a daily activity object from the HTML (more robust than just summing)
+extractDailyHeatmapObject(htmlData) {
+  // Look for likely assignments or JSON blobs containing per-day stats
+  const candidates = [
+    // Some sites embed: var userDailySubmissionsStats = {...};
+    /userDailySubmissionsStats\s*=\s*(\{[\s\S]*?\});/,
+    // Generic JSON object near "heatmap" or "calendar"
+    /heatmap[^=]*=\s*(\{[\s\S]*?\});/i,
+    /calendar[^=]*=\s*(\{[\s\S]*?\});/i,
+    // Raw JSON object as {...} on its own line (fallback, capped length)
+    /(\{[\s\S]{50,8000}\})/
+  ];
+
+  for (const rgx of candidates) {
+    const m = htmlData.match(rgx);
+    if (!m) continue;
+    try {
+      // Strip trailing semicolon if any
+      const jsonStr = m[1].trim().replace(/;$/, '');
+      const obj = JSON.parse(jsonStr);
+      // Sanity check: should have many keys or reasonable day entries
+      if (obj && typeof obj === 'object' && Object.keys(obj).length >= 5) {
+        return obj;
+      }
+    } catch (e) {
+      // try next candidate
+    }
+  }
+
+  // As another strategy, sometimes the heatmap is embedded in a data-* attribute string; skip here for brevity
+  return null;
+}
+
+
 
 }
 
