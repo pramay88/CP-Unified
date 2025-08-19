@@ -116,7 +116,7 @@ class LeetCodeAPI {
             const [profileData, solvedStats, calendarData, contestData, languageData, skillData, badgesData, dailyProblemData] = await Promise.allSettled([
                 this.fetchProfileFromAlfa(username),
                 this.fetchSolvedStats(username),
-                this.fetchCalendarData(username),
+                this.fetchSubmissionCalendarData(username),
                 this.fetchContestData(username),
                 this.fetchLanguageStats(username),
                 this.fetchSkillStats(username),
@@ -209,54 +209,145 @@ class LeetCodeAPI {
         }
     }
     // working
-    async fetchCalendarData(username, year=2024) {
-        const source = "localApi";
-        try {
-            // Try primary source first
-            let calendarResponse;
-            try {
-                calendarResponse = await axios.get(`${this.localApi}/userProfileCalendar?username=${username}&year=${year}`, {
-                    timeout: this.timeout,
-                    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeetCode-Portfolio-API)' }
-                    
-                });
-            } catch (alfaError) {
-                console.log(`Primary calendar API failed, trying fallback: ${alfaError.message}`);
-                // Fallback to direct GraphQL if available
-                // calendarResponse = await this.fetchCalendarFromGraphQL(username);
-                source = "graphql"
-            }
-            
-            
-                let calendardata = calendarResponse.data.data.matchedUser.userCalendar;
+    // Renamed function
+async fetchSubmissionCalendarData(username, defaultYear = 2024) {
+  let source = "localApi";
+  const perYearTimeout = this.timeout ?? 10_000;
 
-                let totalActiveDays = calendardata.totalActiveDays || 0;
-                let maxstreak = calendardata?.streak || 0;
-                let activeYears = calendardata?.activeYears || [];
-                let totalSubmissions = this.getTotalSubmissionsCount(calendardata?.submissionCalendar || {});
-                let submmissionCalendar = this.getDateSubmissionList(calendardata?.submissionCalendar || {});
-
-            return {
-                [year]:{totalSubmissions,
-                totalActiveDays,
-                maxstreak,
-                submmissionCalendar,
-                
-                // Metadata
-                dataSource: source,
-                lastUpdated: new Date().toISOString(),
-                yearRange: {
-                    start: activeYears[0] || null,
-                    end: activeYears[activeYears.length - 1] || null
-                }}
-            };
-            
-        } catch (error) {
-            console.log(`Calendar data fetch failed: ${error.message}`);
-            // Return fallback structure for heatmap
-            return this.getFallbackCalendarData();
+  try {
+    // 1) Fetch a seed year to discover activeYears (use provided defaultYear)
+    let seedResp;
+    try {
+      seedResp = await axios.get(
+        `${this.localApi}/userProfileCalendar?username=${encodeURIComponent(username)}&year=${encodeURIComponent(defaultYear)}`,
+        {
+          timeout: perYearTimeout,
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; LeetCode-Portfolio-API)" },
         }
+      );
+    } catch (seedErr) {
+      console.log(`Primary calendar API failed for seed year, trying fallback: ${seedErr.message}`);
+      // Optional: Try GraphQL fallback to get active years
+      // seedResp = await this.fetchCalendarFromGraphQL(username, defaultYear);
+      source = "graphql";
     }
+
+    if (!seedResp?.data?.data?.matchedUser?.userCalendar) {
+      throw new Error("Seed response missing userCalendar");
+    }
+
+    const seedCalendar = seedResp.data.data.matchedUser.userCalendar;
+    const activeYears = Array.isArray(seedCalendar.activeYears) ? seedCalendar.activeYears : [];
+
+    // If no activeYears are present, still return the single-year data under that year key
+    const yearsToFetch = activeYears.length ? activeYears : [defaultYear];
+
+    // 2) Fetch all years in parallel
+    const fetchYear = async (year) => {
+      try {
+        const resp = await axios.get(
+          `${this.localApi}/userProfileCalendar?username=${encodeURIComponent(username)}&year=${encodeURIComponent(year)}`,
+          {
+            timeout: perYearTimeout,
+            headers: { "User-Agent": "Mozilla/5.0 (compatible; LeetCode-Portfolio-API)" },
+          }
+        );
+
+        const data = resp?.data?.data?.matchedUser?.userCalendar;
+        if (!data) throw new Error(`Missing userCalendar for ${year}`);
+
+        const totalActiveDays = data.totalActiveDays ?? 0;
+        const maxstreak = data?.streak ?? 0;
+        const totalSubmissions = this.getTotalSubmissionsCount(data?.submissionCalendar || {});
+        const submission_calendar_data = this.getDateSubmissionList(data?.submissionCalendar || {});
+
+        const activeYearsFromThisYear = Array.isArray(data?.activeYears) ? data.activeYears : activeYears;
+
+        return {
+          year,
+          value: {
+            totalSubmissions,
+            totalActiveDays,
+            maxstreak,
+            submission_calendar_data,
+            dataSource: source,
+            lastUpdated: new Date().toISOString(),
+            yearRange: {
+              start: activeYearsFromThisYear[0] || null,
+              end: activeYearsFromThisYear[activeYearsFromThisYear.length - 1] || null,
+            },
+          },
+        };
+      } catch (err) {
+        console.log(`Year ${year} fetch failed: ${err.message}`);
+        // Provide a predictable fallback per-year node so consumers don’t break
+        const fallback = this.getFallbackCalendarData?.() ?? {};
+        return {
+          year,
+          value: {
+            ...fallback,
+            dataSource: source,
+            lastUpdated: new Date().toISOString(),
+            yearRange: { start: null, end: null },
+          },
+        };
+      }
+    };
+
+    const results = await Promise.all(yearsToFetch.map(fetchYear));
+
+    // 3) Aggregate keyed by year (numbers as keys)
+    const perYearMap = results.reduce((acc, { year, value }) => {
+      acc[year] = value;
+      return acc;
+    }, {});
+
+    // 4) Optional top-level summary and metadata
+    const allYears = Object.keys(perYearMap).map(Number).sort((a, b) => a - b);
+    const topLevel = {
+      username,
+      activeYears: allYears,
+      range: {
+        start: allYears[0] ?? null,
+        end: allYears[allYears.length - 1] ?? null,
+      },
+      // Useful global aggregates
+      totals: {
+        totalSubmissions: allYears.reduce((sum, y) => sum + (perYearMap[y]?.totalSubmissions ?? 0), 0),
+        totalActiveDays: allYears.reduce((sum, y) => sum + (perYearMap[y]?.totalActiveDays ?? 0), 0),
+        maxStreakOverall: Math.max(...allYears.map((y) => perYearMap[y]?.maxstreak ?? 0), 0),
+      },
+      dataSource: source,
+      lastUpdated: new Date().toISOString(),
+    };
+
+    // 5) Return merged object: top-level + per-year keys
+    return {
+      ...topLevel,
+      ...perYearMap,
+    };
+  } catch (error) {
+    console.log(`Calendar data fetch failed: ${error.message}`);
+    // Fallback structure for multi-year shape
+    const fallback = this.getFallbackCalendarData?.() ?? {};
+    return {
+      username,
+      activeYears: [],
+      range: { start: null, end: null },
+      totals: { totalSubmissions: 0, totalActiveDays: 0, maxStreakOverall: 0 },
+      dataSource: "unknown",
+      lastUpdated: new Date().toISOString(),
+      // No per-year nodes, but include a "current year" placeholder if you want:
+      [defaultYear]: {
+        ...fallback,
+        dataSource: "unknown",
+        lastUpdated: new Date().toISOString(),
+        yearRange: { start: null, end: null },
+      },
+    };
+  }
+}
+
 
     // working 
     getTotalSubmissionsCount(submissionCalendar) {
@@ -490,29 +581,23 @@ class CodeForcesAPI {
         this.timeout = 8000;
     }
 
-    async sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
-
-    async fetchWithRetry(url, retries = 3, delay = 1000) {
-        for (let i = 0; i < retries; i++) {
-            try {
-                const response = await axios.get(url, {
-                    timeout: this.timeout,
-                    headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
-                });
-                return response;
-            } catch (error) {
-                console.log(`Attempt ${i + 1} failed for ${url}: ${error.message}`);
-                if (i === retries - 1) throw error;
-                await this.sleep(delay * Math.pow(2, i));
-            }
+    async fetchWithRetry(url) {
+        try {
+            const response = await axios.get(url, {
+                timeout: this.timeout,
+                headers: { 'User-Agent': 'MultiPlatform-Dashboard-API' }
+            });
+            return response;
+        } catch (error) {
+            console.log(`Attempt ${i + 1} failed for ${url}: ${error.message}`);
+            if (i === retries - 1) throw error;
+            // await this.sleep(delay * Math.pow(2, i));
         }
     }
 
     async getUserData(handle) {
         try {
-            await this.sleep(400);
+            // Removed: await this.sleep(400);
             
             const [userInfo, ratings, submissions, contestData] = await Promise.allSettled([
                 this.fetchWithRetry(`${this.baseURL}/user.info?handles=${handle}`),
@@ -541,7 +626,7 @@ class CodeForcesAPI {
                 username: handle,
                 profile: userData,
                 contests: contests,
-                detailed_stats: this.calculateDetailedStats(userData, ratingsData, submissionsData)
+                solvedStats: this.calculateDetailedStats(userData, ratingsData, submissionsData)
             };
         } catch (error) {
             console.error(`CodeForces API Error for ${handle}:`, error.message);
@@ -646,6 +731,7 @@ class CodeForcesAPI {
         return stats;
     }
 }
+
 
 
 class CodeChefAPI {
@@ -833,7 +919,7 @@ class CodeChefAPI {
 
                     contestData = {
                         contestsAttended: ratingsData.length,
-                        recentContests: recentContests,
+                        // recentContests: recentContests,
                         bestRank: ratingsData.filter(c => c.rank).length > 0 ? 
                             Math.min(...ratingsData.filter(c => c.rank).map(c => c.rank)) : null,
                         worstRank: ratingsData.filter(c => c.rank).length > 0 ? 
@@ -1256,11 +1342,7 @@ class GeeksForGeeksAPI {
             console.log(`Fetching GeeksforGeeks data for: ${username}`);
             
             // Try multiple APIs in sequence
-            let userData = await this.fetchFromPrimaryAPI(username);
-            
-            if (!userData || userData.problems_solved === 0) {
-                userData = await this.fetchFromStatsAPI(username);
-            }
+            let userData = await this.fetchFromStatsAPI(username);
             
             if (!userData || userData.problems_solved === 0) {
                 userData = await this.fetchFromFallbackAPI(username);
@@ -1573,28 +1655,29 @@ class HackerRankAPI {
                 profile: {
                     name: profileStats.name || username,
                     username: username,
-                    avatar: profileStats.avatar || contests.avatar || `https://www.hackerrank.com/rest/hackers/${username}/avatar`,
+                    avatar: profileStats.avatar || contests.avatar,
                     country: profileStats.country || contests.country || null,
-                    school: profileStats.school || contests.school || null,
-                    company: profileStats.company || contests.company || null,
-                    website: profileStats.website || null,
-                    linkedin: profileStats.linkedin || null,
-                    github: profileStats.github || null,
+                    // school: profileStats.school || contests.school || null,
+                    // company: profileStats.company || contests.company || null,
+                    // website: profileStats.website || null,
+                    // linkedin: profileStats.linkedin || null,
+                    // github: profileStats.github || null,
                     created_at: profileStats.created_at || contests.created_at || null,
-                    bio: profileStats.bio || null,
-                    location: profileStats.location || null,
-                    title: contests.title || null
+                    // bio: profileStats.bio || null,
+                    // location: profileStats.location || null,
+                    // title: contests.title || null
                 },
-                detailed_stats: {
+                solvedStats: {
                     // Core Statistics
-                    rank: profileStats.rank || 0,
-                    level: profileStats.level || contests.level || badgeStats.highest_level || 1,
+                    rank: profileStats.rank || null,
+                    level: profileStats.level || contests.level || badgeStats.highest_level || null,
+                    totalSolved: badgeStats.total_solved,
                     hackos: profileStats.hackos || 0,
                     
                     // Social Statistics  
-                    followers: profileStats.followers || contests.followers || 0,
-                    following: profileStats.following || 0,
-                    event_count: contests.event_count || 0,
+                    followers: profileStats.followers || contests.followers || null,
+                    following: profileStats.following || null,
+                    // event_count: contests.event_count || null,
                     
                     // Badge Information
                     badges: badgeStats.badges,
@@ -1608,7 +1691,6 @@ class HackerRankAPI {
                     contest_performance: eloStats.contest_performance,
                     
                     // Problem Solving Statistics (from badges + ELO)
-                    problems_solved: badgeStats.total_solved,
                     challenges_completed: badgeStats.total_challenges_solved,
                     total_points: Math.max(badgeStats.total_points, eloStats.total_practice_score),
                     total_stars: badgeStats.total_stars,
@@ -2125,11 +2207,781 @@ const multiAPI = new MultiPlatformAPI();
 // ENHANCED HELPER FUNCTIONS
 // ==========================================
 
+function generateUnifiedActivityHeatmap(platformData, options = {}) {
+    const {
+        includeInactiveDays = false,
+        dateRange = 'auto', // 'auto', 'year', 'custom'
+        startDate = null,
+        endDate = null
+    } = options;
+
+    const today = new Date();
+    const { actualStartDate, actualEndDate } = determineDateRange(platformData, dateRange, startDate, endDate, today);
+    
+    // Initialize activity data with sparse structure
+    const dailyActivity = {};
+    
+    // Process each platform's activity first to determine actual active dates
+    const activeDates = new Set();
+    Object.entries(platformData).forEach(([platform, data]) => {
+        if (data.status === "OK") {
+            const platformActiveDates = processPlatformActivity(platform, data, actualStartDate, actualEndDate);
+            platformActiveDates.forEach(date => activeDates.add(date));
+        }
+    });
+
+    // Only initialize days that have activity OR if includeInactiveDays is true
+    if (includeInactiveDays) {
+        // Initialize all days in range
+        for (let d = new Date(actualStartDate); d <= actualEndDate; d.setDate(d.getDate() + 1)) {
+            const dateStr = d.toISOString().split('T')[0];
+            dailyActivity[dateStr] = initializeDayData(dateStr, d);
+        }
+    } else {
+        // Only initialize active days
+        activeDates.forEach(dateStr => {
+            const date = new Date(dateStr);
+            dailyActivity[dateStr] = initializeDayData(dateStr, date);
+        });
+    }
+
+    // Process platform data and populate activity
+    Object.entries(platformData).forEach(([platform, data]) => {
+        if (data.status === "OK") {
+            populatePlatformActivity(platform, data, dailyActivity, actualStartDate, actualEndDate);
+        }
+    });
+
+    // Convert to array, calculate levels, and sort by date
+    const activityArray = Object.values(dailyActivity)
+        .filter(day => includeInactiveDays || day.total > 0) // Filter out inactive days if requested
+        .map(day => ({
+            ...day,
+            level: calculateActivityLevel(day.total),
+            intensity: calculateIntensity(day.total),
+            platform_count: Object.values(day.platforms).filter(count => count > 0).length,
+            year: new Date(day.date).getFullYear()
+        }))
+        .sort((a, b) => new Date(a.date) - new Date(b.date)); // Sort by date ascending
+
+    // Group by year for better organization
+    const yearlyData = groupByYear(activityArray);
+    
+    // Calculate metrics
+    const streakData = calculateActivityStreaks(activityArray);
+    const weeklyStats = calculateWeeklyStats(activityArray);
+    const monthlyStats = calculateMonthlyStats(activityArray);
+
+    return {
+        metadata: {
+            date_range: {
+                start: actualStartDate.toISOString().split('T')[0],
+                end: actualEndDate.toISOString().split('T')[0]
+            },
+            total_days: activityArray.length,
+            total_active_days: activityArray.filter(day => day.total > 0).length,
+            includes_inactive_days: includeInactiveDays,
+            data_quality: calculateDataQuality(platformData),
+            last_updated: new Date().toISOString(),
+            years_covered: Object.keys(yearlyData).map(Number).sort()
+        },
+        yearly_activity: yearlyData, // Organized by year
+        summary_stats: {
+            total_contributions: activityArray.reduce((sum, day) => sum + day.total, 0),
+            max_daily_activity: Math.max(...activityArray.map(day => day.total), 0),
+            average_daily_activity: activityArray.length > 0 
+                ? Number((activityArray.reduce((sum, day) => sum + day.total, 0) / activityArray.length).toFixed(2))
+                : 0,
+            current_streak: streakData.current_streak,
+            longest_streak: streakData.longest_streak,
+            platform_contributions: calculatePlatformContributions(activityArray),
+            most_active_day: getMostActiveDay(activityArray),
+            most_active_month: getMostActiveMonth(monthlyStats)
+        },
+        advanced_metrics: {
+            weekly_average: weeklyStats.average,
+            monthly_breakdown: monthlyStats.breakdown,
+            activity_distribution: calculateActivityDistribution(activityArray),
+            consistency_score: calculateConsistencyScore(activityArray),
+            platform_diversity: calculatePlatformDiversity(activityArray),
+            yearly_comparison: calculateYearlyComparison(yearlyData)
+        },
+        heatmap_config: {
+            color_scale: {
+                0: '#ebedf0',
+                1: '#9be9a8', 
+                2: '#40c463',
+                3: '#30a14e',
+                4: '#216e39'
+            },
+            cell_size: 11,
+            cell_gap: 3,
+            month_labels: true,
+            weekday_labels: true
+        }
+    };
+}
+
+function determineDateRange(platformData, dateRange, startDate, endDate, today) {
+    let actualStartDate, actualEndDate;
+    
+    if (dateRange === 'custom' && startDate && endDate) {
+        actualStartDate = new Date(startDate);
+        actualEndDate = new Date(endDate);
+    } else if (dateRange === 'year') {
+        actualStartDate = new Date(today.getFullYear(), 0, 1);
+        actualEndDate = today;
+    } else {
+        // 'auto' - determine from platform data
+        const platformDates = [];
+        
+        Object.values(platformData).forEach(data => {
+            if (data.status === "OK") {
+                const dates = extractPlatformDateRange(data);
+                platformDates.push(...dates);
+            }
+        });
+        
+        if (platformDates.length > 0) {
+            actualStartDate = new Date(Math.min(...platformDates));
+            actualEndDate = today;
+        } else {
+            // Fallback to last year
+            actualStartDate = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate());
+            actualEndDate = today;
+        }
+    }
+    
+    return { actualStartDate, actualEndDate };
+}
+
+function extractPlatformDateRange(data) {
+    const dates = [];
+    
+    try {
+        // LeetCode - handle yearly structure
+        if (data.calendar_data) {
+            Object.keys(data.calendar_data).forEach(year => {
+                const yearData = data.calendar_data[year];
+                // Handle "submmissionCalendar" (with typo)
+                if (yearData?.submmissionCalendar && Array.isArray(yearData.submmissionCalendar)) {
+                    yearData.submmissionCalendar.forEach(entry => {
+                        dates.push(new Date(entry.date).getTime());
+                    });
+                }
+                // Handle corrected "submissionCalendar"
+                else if (yearData?.submissionCalendar && Array.isArray(yearData.submissionCalendar)) {
+                    yearData.submissionCalendar.forEach(entry => {
+                        dates.push(new Date(entry.date).getTime());
+                    });
+                }
+            });
+        }
+        // Fallback for old timestamp structure
+        else if (data.calendar_data?.submissionCalendar) {
+            Object.keys(data.calendar_data.submissionCalendar).forEach(timestamp => {
+                dates.push(parseInt(timestamp) * 1000);
+            });
+        }
+        
+        // GitHub
+        if (data.recent_activity) {
+            data.recent_activity.forEach(event => {
+                dates.push(new Date(event.created_at).getTime());
+            });
+        }
+        
+        // AtCoder
+        if (data.submissions) {
+            data.submissions.forEach(submission => {
+                dates.push(submission.epoch_second * 1000);
+            });
+        }
+        
+        // CodeForces - contests
+        if (data.contests?.ratingProgression) {
+            data.contests.ratingProgression.forEach(contest => {
+                dates.push(new Date(contest.date).getTime());
+            });
+        }
+    } catch (error) {
+        console.log('Error extracting date range:', error.message);
+    }
+    
+    return dates;
+}
+
+function initializeDayData(dateStr, date) {
+    return {
+        date: dateStr,
+        total: 0,
+        platforms: {
+            leetcode: 0,
+            codeforces: 0,
+            codechef: 0,
+            github: 0,
+            geeksforgeeks: 0,
+            hackerrank: 0,
+            atcoder: 0
+        },
+        timestamp: Math.floor(date.getTime() / 1000),
+        weekday: date.getDay(),
+        week_of_year: getWeekOfYear(date),
+        month: date.getMonth() + 1
+    };
+}
+
+function processPlatformActivity(platform, data, startDate, endDate) {
+    const activeDates = new Set();
+    
+    try {
+        switch (platform) {
+            case 'leetcode':
+                // Handle new yearly structure
+                if (data.calendar_data) {
+                    Object.keys(data.calendar_data).forEach(year => {
+                        const yearData = data.calendar_data[year];
+                        // Handle "submmissionCalendar" (with typo)
+                        if (yearData?.submmissionCalendar && Array.isArray(yearData.submmissionCalendar)) {
+                            yearData.submmissionCalendar.forEach(entry => {
+                                const date = new Date(entry.date);
+                                if (date >= startDate && date <= endDate && entry.submissionCount > 0) {
+                                    activeDates.add(entry.date);
+                                }
+                            });
+                        }
+                        // Handle corrected "submissionCalendar"
+                        else if (yearData?.submissionCalendar && Array.isArray(yearData.submissionCalendar)) {
+                            yearData.submissionCalendar.forEach(entry => {
+                                const date = new Date(entry.date);
+                                if (date >= startDate && date <= endDate && entry.submissionCount > 0) {
+                                    activeDates.add(entry.date);
+                                }
+                            });
+                        }
+                    });
+                }
+                // Fallback for old structure
+                else if (data.calendar_data?.submissionCalendar) {
+                    Object.keys(data.calendar_data.submissionCalendar).forEach(timestamp => {
+                        const date = new Date(parseInt(timestamp) * 1000);
+                        if (date >= startDate && date <= endDate) {
+                            activeDates.add(date.toISOString().split('T')[0]);
+                        }
+                    });
+                }
+                break;
+                
+            case 'github':
+                if (data.recent_activity) {
+                    data.recent_activity.forEach(event => {
+                        const date = new Date(event.created_at);
+                        if (date >= startDate && date <= endDate) {
+                            activeDates.add(date.toISOString().split('T')[0]);
+                        }
+                    });
+                }
+                break;
+                
+            case 'atcoder':
+                if (data.submissions) {
+                    data.submissions.forEach(submission => {
+                        const date = new Date(submission.epoch_second * 1000);
+                        if (date >= startDate && date <= endDate && submission.result === 'AC') {
+                            activeDates.add(date.toISOString().split('T')[0]);
+                        }
+                    });
+                }
+                break;
+                
+            case 'codeforces':
+                if (data.contests?.ratingProgression) {
+                    data.contests.ratingProgression.forEach(contest => {
+                        const date = new Date(contest.date);
+                        if (date >= startDate && date <= endDate) {
+                            activeDates.add(date.toISOString().split('T')[0]);
+                        }
+                    });
+                }
+                break;
+        }
+    } catch (error) {
+        console.log(`Error processing ${platform} activity dates:`, error.message);
+    }
+    
+    return activeDates;
+}
+
+function populatePlatformActivity(platform, data, dailyActivity, startDate, endDate) {
+    // Reuse your existing processing functions but only update existing dates in dailyActivity
+    switch (platform) {
+        case 'leetcode':
+            processLeetCodeActivityOptimized(data, dailyActivity, startDate, endDate);
+            break;
+        case 'codeforces':
+            processCodeForcesActivityOptimized(data, dailyActivity, startDate, endDate);
+            break;
+        case 'github':
+            processGitHubActivityOptimized(data, dailyActivity, startDate, endDate);
+            break;
+        case 'codechef':
+            processCodeChefActivityOptimized(data, dailyActivity, startDate, endDate);
+            break;
+        case 'geeksforgeeks':
+            processGeeksForGeeksActivityOptimized(data, dailyActivity, startDate, endDate);
+            break;
+        case 'hackerrank':
+            processHackerRankActivityOptimized(data, dailyActivity, startDate, endDate);
+            break;
+        case 'atcoder':
+            processAtCoderActivityOptimized(data, dailyActivity, startDate, endDate);
+            break;
+    }
+}
+
+function processLeetCodeActivityOptimized(data, dailyActivity, startDate, endDate) {
+    try {
+        // Handle new data structure with yearly breakdown
+        if (data.calendar_data) {
+            // Check for yearly structure like calendar_data["2024"].submmissionCalendar
+            Object.keys(data.calendar_data).forEach(year => {
+                const yearData = data.calendar_data[year];
+                if (yearData && yearData.submmissionCalendar && Array.isArray(yearData.submmissionCalendar)) {
+                    yearData.submmissionCalendar.forEach(entry => {
+                        const date = new Date(entry.date);
+                        if (date >= startDate && date <= endDate) {
+                            const dateStr = entry.date;
+                            if (dailyActivity[dateStr]) {
+                                const submissions = parseInt(entry.submissionCount) || 0;
+                                dailyActivity[dateStr].platforms.leetcode += submissions;
+                                dailyActivity[dateStr].total += submissions;
+                            }
+                        }
+                    });
+                }
+                // Also handle the corrected spelling "submissionCalendar"
+                else if (yearData && yearData.submissionCalendar && Array.isArray(yearData.submissionCalendar)) {
+                    yearData.submissionCalendar.forEach(entry => {
+                        const date = new Date(entry.date);
+                        if (date >= startDate && date <= endDate) {
+                            const dateStr = entry.date;
+                            if (dailyActivity[dateStr]) {
+                                const submissions = parseInt(entry.submissionCount) || 0;
+                                dailyActivity[dateStr].platforms.leetcode += submissions;
+                                dailyActivity[dateStr].total += submissions;
+                            }
+                        }
+                    });
+                }
+            });
+        }
+        
+        // Fallback: Handle old structure with submissionCalendar object
+        else if (data.calendar_data?.submissionCalendar) {
+            Object.entries(data.calendar_data.submissionCalendar).forEach(([timestamp, count]) => {
+                const date = new Date(parseInt(timestamp) * 1000);
+                if (date >= startDate && date <= endDate) {
+                    const dateStr = date.toISOString().split('T')[0];
+                    if (dailyActivity[dateStr]) {
+                        const submissions = parseInt(count) || 0;
+                        dailyActivity[dateStr].platforms.leetcode += submissions;
+                        dailyActivity[dateStr].total += submissions;
+                    }
+                }
+            });
+        }
+    } catch (error) {
+        console.log('Error processing LeetCode activity:', error.message);
+    }
+}
+
+function processGitHubActivityOptimized(data, dailyActivity, startDate, endDate) {
+    try {
+        if (data.recent_activity && Array.isArray(data.recent_activity)) {
+            data.recent_activity.forEach(event => {
+                const date = new Date(event.created_at);
+                if (date >= startDate && date <= endDate) {
+                    const dateStr = date.toISOString().split('T')[0];
+                    if (dailyActivity[dateStr]) {
+                        let activityCount = getGitHubActivityWeight(event);
+                        dailyActivity[dateStr].platforms.github += activityCount;
+                        dailyActivity[dateStr].total += activityCount;
+                    }
+                }
+            });
+        }
+    } catch (error) {
+        console.log('Error processing GitHub activity:', error.message);
+    }
+}
+
+function processCodeForcesActivityOptimized(data, dailyActivity, startDate, endDate) {
+    try {
+        // Process contest participation
+        if (data.contests && data.contests.ratingProgression) {
+            data.contests.ratingProgression.forEach(contest => {
+                const date = new Date(contest.date);
+                if (date >= startDate && date <= endDate) {
+                    const dateStr = date.toISOString().split('T')[0];
+                    if (dailyActivity[dateStr]) {
+                        dailyActivity[dateStr].platforms.codeforces += 5;
+                        dailyActivity[dateStr].total += 5;
+                    }
+                }
+            });
+        }
+        
+        // Distribute recent problems solved (only for existing dates in dailyActivity)
+        const problemsSolved = data.detailed_stats?.problems_solved || 0;
+        if (problemsSolved > 0) {
+            const activeDates = Object.keys(dailyActivity).filter(date => {
+                const d = new Date(date);
+                return d >= startDate && d <= endDate && dailyActivity[date].platforms.codeforces === 0;
+            });
+            
+            let remaining = Math.floor(problemsSolved * 0.3);
+            activeDates.forEach(dateStr => {
+                if (remaining > 0 && Math.random() < 0.25) {
+                    const activity = Math.min(remaining, Math.floor(Math.random() * 3) + 1);
+                    dailyActivity[dateStr].platforms.codeforces += activity;
+                    dailyActivity[dateStr].total += activity;
+                    remaining -= activity;
+                }
+            });
+        }
+    } catch (error) {
+        console.log('Error processing CodeForces activity:', error.message);
+    }
+}
+
+function processCodeChefActivityOptimized(data, dailyActivity, startDate, endDate) {
+    try {
+        const problemsSolved = data.detailed_stats?.problems_solved || 0;
+        
+        if (problemsSolved > 0) {
+            const activeDates = Object.keys(dailyActivity).filter(date => {
+                const d = new Date(date);
+                return d >= startDate && d <= endDate;
+            });
+            
+            let remaining = problemsSolved;
+            activeDates.forEach(dateStr => {
+                if (remaining > 0 && Math.random() < 0.25) {
+                    const activity = Math.min(remaining, Math.floor(Math.random() * 2) + 1);
+                    dailyActivity[dateStr].platforms.codechef += activity;
+                    dailyActivity[dateStr].total += activity;
+                    remaining -= activity;
+                }
+            });
+        }
+    } catch (error) {
+        console.log('Error processing CodeChef activity:', error.message);
+    }
+}
+
+function processGeeksForGeeksActivityOptimized(data, dailyActivity, startDate, endDate) {
+    try {
+        const problemsSolved = data.detailed_stats?.problems_solved || 0;
+        const currentStreak = data.detailed_stats?.current_streak || 0;
+        
+        if (problemsSolved > 0) {
+            const activeDates = Object.keys(dailyActivity)
+                .filter(date => {
+                    const d = new Date(date);
+                    return d >= startDate && d <= endDate;
+                })
+                .sort((a, b) => new Date(b) - new Date(a)); // Sort descending for recent streak
+            
+            // Add recent streak activity
+            for (let i = 0; i < Math.min(currentStreak, activeDates.length); i++) {
+                const dateStr = activeDates[i];
+                dailyActivity[dateStr].platforms.geeksforgeeks += 1;
+                dailyActivity[dateStr].total += 1;
+            }
+            
+            // Distribute remaining problems
+            let remaining = Math.max(0, problemsSolved - currentStreak);
+            for (let i = currentStreak; i < activeDates.length && remaining > 0; i++) {
+                if (Math.random() < 0.2) {
+                    const activity = Math.min(remaining, Math.floor(Math.random() * 2) + 1);
+                    dailyActivity[activeDates[i]].platforms.geeksforgeeks += activity;
+                    dailyActivity[activeDates[i]].total += activity;
+                    remaining -= activity;
+                }
+            }
+        }
+    } catch (error) {
+        console.log('Error processing GeeksForGeeks activity:', error.message);
+    }
+}
+
+function processHackerRankActivityOptimized(data, dailyActivity, startDate, endDate) {
+    try {
+        const problemsSolved = data.detailed_stats?.problems_solved || 0;
+        const contestMedals = data.detailed_stats?.contest_medals || { gold: 0, silver: 0, bronze: 0 };
+        const totalMedals = contestMedals.gold + contestMedals.silver + contestMedals.bronze;
+        
+        const activeDates = Object.keys(dailyActivity).filter(date => {
+            const d = new Date(date);
+            return d >= startDate && d <= endDate;
+        });
+        
+        // Add contest activity
+        if (totalMedals > 0 && activeDates.length > 0) {
+            const contestDays = Math.min(totalMedals * 2, activeDates.length);
+            for (let i = 0; i < contestDays; i++) {
+                const randomDate = activeDates[Math.floor(Math.random() * activeDates.length)];
+                dailyActivity[randomDate].platforms.hackerrank += 3;
+                dailyActivity[randomDate].total += 3;
+            }
+        }
+        
+        // Distribute practice problems
+        if (problemsSolved > 0) {
+            let remaining = Math.floor(problemsSolved * 0.4);
+            activeDates.forEach(dateStr => {
+                if (remaining > 0 && Math.random() < 0.25) {
+                    const activity = Math.min(remaining, Math.floor(Math.random() * 4) + 1);
+                    dailyActivity[dateStr].platforms.hackerrank += activity;
+                    dailyActivity[dateStr].total += activity;
+                    remaining -= activity;
+                }
+            });
+        }
+    } catch (error) {
+        console.log('Error processing HackerRank activity:', error.message);
+    }
+}
+
+function processAtCoderActivityOptimized(data, dailyActivity, startDate, endDate) {
+    try {
+        if (data.submissions && Array.isArray(data.submissions)) {
+            data.submissions.forEach(submission => {
+                const date = new Date(submission.epoch_second * 1000);
+                if (date >= startDate && date <= endDate && submission.result === 'AC') {
+                    const dateStr = date.toISOString().split('T')[0];
+                    if (dailyActivity[dateStr]) {
+                        dailyActivity[dateStr].platforms.atcoder += 1;
+                        dailyActivity[dateStr].total += 1;
+                    }
+                }
+            });
+        }
+    } catch (error) {
+        console.log('Error processing AtCoder activity:', error.message);
+    }
+}
+
+function getGitHubActivityWeight(event) {
+    switch (event.type) {
+        case 'PushEvent':
+            return event.payload?.commits?.length || 1;
+        case 'PullRequestEvent':
+            return 2;
+        case 'IssuesEvent':
+        case 'CreateEvent':
+        default:
+            return 1;
+    }
+}
+
+function groupByYear(activityArray) {
+    const yearlyData = {};
+    
+    activityArray.forEach(day => {
+        const year = day.year;
+        if (!yearlyData[year]) {
+            yearlyData[year] = [];
+        }
+        yearlyData[year].push(day);
+    });
+    
+    return yearlyData;
+}
+
+function calculateActivityDistribution(activityArray) {
+    return {
+        level_0_days: activityArray.filter(d => d.level === 0).length,
+        level_1_days: activityArray.filter(d => d.level === 1).length,
+        level_2_days: activityArray.filter(d => d.level === 2).length,
+        level_3_days: activityArray.filter(d => d.level === 3).length,
+        level_4_days: activityArray.filter(d => d.level === 4).length
+    };
+}
+
+function calculateYearlyComparison(yearlyData) {
+    const comparison = {};
+    
+    Object.keys(yearlyData).forEach(year => {
+        const yearData = yearlyData[year];
+        comparison[year] = {
+            total_contributions: yearData.reduce((sum, day) => sum + day.total, 0),
+            active_days: yearData.filter(day => day.total > 0).length,
+            average_daily: yearData.length > 0 
+                ? Number((yearData.reduce((sum, day) => sum + day.total, 0) / yearData.length).toFixed(2))
+                : 0,
+            max_daily: Math.max(...yearData.map(day => day.total), 0)
+        };
+    });
+    
+    return comparison;
+}
+
+function calculateIntensity(count) {
+    return Math.min(count / 10, 1); // Normalize to 0-1 scale
+}
+
+// Helper functions that need to be implemented
+function getWeekOfYear(date) {
+    const start = new Date(date.getFullYear(), 0, 1);
+    const diff = date - start;
+    const oneWeek = 1000 * 60 * 60 * 24 * 7;
+    return Math.floor(diff / oneWeek) + 1;
+}
+
+function calculateDataQuality(platformData) {
+    const totalPlatforms = Object.keys(platformData).length;
+    const successfulPlatforms = Object.values(platformData).filter(data => data.status === "OK").length;
+    return Number((successfulPlatforms / totalPlatforms).toFixed(2));
+}
+
+function calculateActivityStreaks(activityArray) {
+    let currentStreak = 0;
+    let longestStreak = 0;
+    let tempStreak = 0;
+    
+    // Sort by date to ensure proper streak calculation
+    const sortedArray = [...activityArray].sort((a, b) => new Date(a.date) - new Date(b.date));
+    
+    for (let i = 0; i < sortedArray.length; i++) {
+        if (sortedArray[i].total > 0) {
+            tempStreak++;
+            longestStreak = Math.max(longestStreak, tempStreak);
+            
+            // Check if this is part of current streak (from end)
+            if (i >= sortedArray.length - tempStreak) {
+                currentStreak = tempStreak;
+            }
+        } else {
+            tempStreak = 0;
+        }
+    }
+    
+    // Verify current streak is actually current (ends at today)
+    const today = new Date().toISOString().split('T')[0];
+    const lastActiveDay = sortedArray.slice().reverse().find(day => day.total > 0);
+    if (!lastActiveDay || lastActiveDay.date !== today) {
+        currentStreak = 0;
+    }
+    
+    return { current_streak: currentStreak, longest_streak: longestStreak };
+}
+
+function calculateWeeklyStats(activityArray) {
+    if (activityArray.length === 0) return { average: 0 };
+    
+    const weeklyTotals = {};
+    activityArray.forEach(day => {
+        const weekKey = `${day.year}-W${day.week_of_year}`;
+        if (!weeklyTotals[weekKey]) weeklyTotals[weekKey] = 0;
+        weeklyTotals[weekKey] += day.total;
+    });
+    
+    const weeks = Object.values(weeklyTotals);
+    const average = weeks.length > 0 ? Number((weeks.reduce((sum, total) => sum + total, 0) / weeks.length).toFixed(2)) : 0;
+    
+    return { average, weekly_totals: weeklyTotals };
+}
+
+function calculateMonthlyStats(activityArray) {
+    if (activityArray.length === 0) return { breakdown: {} };
+    
+    const monthlyBreakdown = {};
+    activityArray.forEach(day => {
+        const monthKey = `${day.year}-${String(day.month).padStart(2, '0')}`;
+        if (!monthlyBreakdown[monthKey]) {
+            monthlyBreakdown[monthKey] = { total: 0, active_days: 0 };
+        }
+        monthlyBreakdown[monthKey].total += day.total;
+        if (day.total > 0) monthlyBreakdown[monthKey].active_days++;
+    });
+    
+    return { breakdown: monthlyBreakdown };
+}
+
+function getMostActiveDay(activityArray) {
+    if (activityArray.length === 0) return null;
+    
+    return activityArray.reduce((max, day) => day.total > max.total ? day : max, activityArray[0]);
+}
+
+function getMostActiveMonth(monthlyStats) {
+    if (!monthlyStats.breakdown || Object.keys(monthlyStats.breakdown).length === 0) return null;
+    
+    return Object.entries(monthlyStats.breakdown).reduce((max, [month, stats]) => 
+        stats.total > max.total ? { month, ...stats } : max, 
+        { month: null, total: 0 }
+    );
+}
+
+function calculateConsistencyScore(activityArray) {
+    if (activityArray.length === 0) return 0;
+    
+    const activeDays = activityArray.filter(day => day.total > 0).length;
+    const totalDays = activityArray.length;
+    
+    return Number((activeDays / totalDays).toFixed(3));
+}
+
+function calculatePlatformDiversity(activityArray) {
+    if (activityArray.length === 0) return 0;
+    
+    const platformUsage = {};
+    const platformNames = ['leetcode', 'codeforces', 'codechef', 'github', 'geeksforgeeks', 'hackerrank', 'atcoder'];
+    
+    platformNames.forEach(platform => {
+        platformUsage[platform] = activityArray.filter(day => day.platforms[platform] > 0).length;
+    });
+    
+    const activePlatforms = Object.values(platformUsage).filter(count => count > 0).length;
+    
+    return Number((activePlatforms / platformNames.length).toFixed(3));
+}
+
+function calculateActivityLevel(count) {
+    if (count === 0) return 0;
+    if (count <= 2) return 1;
+    if (count <= 4) return 2;
+    if (count <= 6) return 3;
+    return 4;
+}
+
+function calculatePlatformContributions(activityArray) {
+    const contributions = {
+        leetcode: 0,
+        codeforces: 0,
+        codechef: 0,
+        github: 0,
+        geeksforgeeks: 0,
+        hackerrank: 0,
+        atcoder: 0
+    };
+    
+    activityArray.forEach(day => {
+        Object.keys(contributions).forEach(platform => {
+            contributions[platform] += day.platforms[platform] || 0;
+        });
+    });
+    
+    return contributions;
+}
+
 function generateAggregatedStats(platformData) {
     const stats = {
         platforms_connected: 0,
         total_problems_solved: 0,
         total_contests: 0,
+        average_rating: 0,
         overall_rating: 0,
         platform_breakdown: {},
         summary: {
@@ -2145,11 +2997,11 @@ function generateAggregatedStats(platformData) {
             contest_ratings: {},
             problem_solving_trend: {}
         },
-        // ADD THIS NEW SECTION
+        // Unified activity heatmap
         unified_activity_heatmap: generateUnifiedActivityHeatmap(platformData)
     };
 
-    // ... rest of existing code remains the same
+    // Process each platform
     Object.entries(platformData).forEach(([platform, data]) => {
         if (data.status === "OK") {
             stats.platforms_connected++;
@@ -2167,56 +3019,55 @@ function generateAggregatedStats(platformData) {
 
     // Convert Set to Array for JSON serialization
     stats.combined_metrics.programming_languages = Array.from(stats.combined_metrics.programming_languages);
-
+    
     // Calculate totals
     calculateTotalStats(stats);
 
     return stats;
 }
 
-
 function extractPlatformStats(platform, data) {
     switch (platform) {
         case 'leetcode':
             return {
                 username: data.username,
-                problems_solved: data.detailed_stats?.total_solved || 0,
-                easy_solved: data.detailed_stats?.easy_solved || 0,
-                medium_solved: data.detailed_stats?.medium_solved || 0,
-                hard_solved: data.detailed_stats?.hard_solved || 0,
-                contests_attended: data.detailed_stats?.contests_attended || 0,
-                contest_rating: data.detailed_stats?.contest_rating || 0,
-                acceptance_rate: data.detailed_stats?.acceptance_rate || 0,
-                ranking: data.detailed_stats?.ranking || 0,
-                recent_submissions: data.detailed_stats?.recent_submissions || []
+                problems_solved: data.solvedStats?.totalSolved || 0,
+                easy_solved: data.solvedStats?.easySolved || 0,
+                medium_solved: data.solvedStats?.mediumSolved || 0,
+                hard_solved: data.solvedStats?.hardSolved || 0,
+                contests_attended: data.contests?.contestAttend || 0,
+                contest_rating: data.contests?.contestRating || 0,
+                contest_global_ranking: data.contests?.contestGlobalRanking || 0,
+                acceptance_rate: data.solvedStats?.acceptance_rate || 0,
+                ranking: data.profile?.ranking || 0
             };
         
         case 'codeforces':
-    return {
-        username: data.username,
-        current_rating: data.detailed_stats?.current_rating || 0,
-        max_rating: data.detailed_stats?.max_rating || 0,
-        rank: data.detailed_stats?.rank || "unrated",
-        max_rank: data.detailed_stats?.max_rank || "unrated",
-        contests_participated: data.detailed_stats?.contests_participated || 0,
-        problems_solved: data.detailed_stats?.problems_solved || 0,
-        acceptance_rate: data.detailed_stats?.acceptance_rate || 0,
-        total_submissions: data.detailed_stats?.total_submissions || 0,
-        contribution: data.detailed_stats?.contribution || 0
-    };
+            return {
+                username: data.username,
+                current_rating: data.profile?.rating || 0,
+                max_rating: data.profile?.maxRating || 0,
+                rank: data.profile?.rank || "unrated",
+                max_rank: data.profile?.maxRank || "unrated",
+                contests_participated: data.contests?.contestsAttended || 0,
+                problems_solved: data.solvedStats?.problems_solved || 0,
+                acceptance_rate: data.detailed_stats?.acceptance_rate || null,
+                friendOfCount: data.profile?.friendOfCount || 0,
+                contribution: data.solvedStats?.contribution || 0
+            };
 
-case 'codechef':
-    return {
-        username: data.username,
-        current_rating: data.detailed_stats?.current_rating || 0,
-        highest_rating: data.detailed_stats?.highest_rating || 0,
-        problems_solved: data.detailed_stats?.problems_solved || 0,
-        contests_attended: data.detailed_stats?.contests_attended || 0,
-        global_rank: data.detailed_stats?.global_rank || 0,
-        country_rank: data.detailed_stats?.country_rank || 0,
-        stars: data.detailed_stats?.stars || "unrated",
-        division: data.detailed_stats?.division || "Unrated"
-    };
+        case 'codechef':
+            return {
+                username: data.username,
+                current_rating: data.contests?.current_rating || 0,
+                highest_rating: data.contests?.highest_rating || 0,
+                problems_solved: data.solvedStats?.totalSolved || 0,
+                contests_attended: data.contests?.contestsData?.contestsAttended || 0,
+                global_rank: data.profile?.globalRank || 0,
+                country_rank: data.profile?.globalRank || 0,
+                stars: data.profile?.stars || "unrated",
+                division: data.contests?.division || "Unrated"
+            };
         
         case 'geeksforgeeks':
             return {
@@ -2240,31 +3091,31 @@ case 'codechef':
                 top_repositories: data.detailed_stats?.top_repositories || []
             };
         
-case 'hackerrank':
-    return {
-        username: data.username,
-        rank: data.detailed_stats?.rank || 0,
-        level: data.detailed_stats?.level || 0,
-        hackos: data.detailed_stats?.hackos || 0,
-        badges: data.detailed_stats?.total_badges || 0,
-        problems_solved: data.detailed_stats?.problems_solved || 0,
-        total_points: data.detailed_stats?.total_points || 0,
-        total_stars: data.detailed_stats?.total_stars || 0,
-        followers: data.detailed_stats?.followers || 0,
-        following: data.detailed_stats?.following || 0,
-        event_count: data.detailed_stats?.event_count || 0,
-        contest_medals: data.detailed_stats?.contest_medals || { gold: 0, silver: 0, bronze: 0 },
-        strongest_domain: data.detailed_stats?.achievement_summary?.best_domain || "None",
-        languages_practiced: data.detailed_stats?.achievement_summary?.languages_practiced || 0,
-        domains_practiced: data.detailed_stats?.achievement_summary?.domains_practiced || 0,
-        contest_participation: data.detailed_stats?.achievement_summary?.contest_participation || 0,
-        activity_level: data.detailed_stats?.activity_level || "New",
-        algorithms_score: data.detailed_stats?.algorithms_score || 0,
-        data_structures_score: data.detailed_stats?.data_structures_score || 0,
-        python_score: data.detailed_stats?.python_score || 0,
-        java_score: data.detailed_stats?.java_score || 0,
-        cpp_score: data.detailed_stats?.cpp_score || 0
-    };
+        case 'hackerrank':
+            return {
+                username: data.username,
+                rank: data.detailed_stats?.rank || 0,
+                level: data.detailed_stats?.level || 0,
+                hackos: data.detailed_stats?.hackos || 0,
+                badges: data.detailed_stats?.total_badges || 0,
+                problems_solved: data.detailed_stats?.problems_solved || 0,
+                total_points: data.detailed_stats?.total_points || 0,
+                total_stars: data.detailed_stats?.total_stars || 0,
+                followers: data.detailed_stats?.followers || 0,
+                following: data.detailed_stats?.following || 0,
+                event_count: data.detailed_stats?.event_count || 0,
+                contest_medals: data.detailed_stats?.contest_medals || { gold: 0, silver: 0, bronze: 0 },
+                strongest_domain: data.detailed_stats?.achievement_summary?.best_domain || "None",
+                languages_practiced: data.detailed_stats?.achievement_summary?.languages_practiced || 0,
+                domains_practiced: data.detailed_stats?.achievement_summary?.domains_practiced || 0,
+                contest_participation: data.detailed_stats?.achievement_summary?.contest_participation || 0,
+                activity_level: data.detailed_stats?.activity_level || "New",
+                algorithms_score: data.detailed_stats?.algorithms_score || 0,
+                data_structures_score: data.detailed_stats?.data_structures_score || 0,
+                python_score: data.detailed_stats?.python_score || 0,
+                java_score: data.detailed_stats?.java_score || 0,
+                cpp_score: data.detailed_stats?.cpp_score || 0
+            };
 
         case 'atcoder':
             return {
@@ -2296,54 +3147,52 @@ function aggregateCombinedMetrics(combined, platform, data) {
             break;
         
         case 'codeforces':
-            if (data.detailed_stats?.current_rating) {
-                combined.contest_ratings.codeforces = data.detailed_stats.current_rating;
+            if (data.profile?.rating) {
+                combined.contest_ratings.codeforces = data.profile.rating;
             }
             break;
         
         case 'codechef':
-            if (data.detailed_stats?.current_rating) {
-                combined.contest_ratings.codechef = data.detailed_stats.current_rating;
+            if (data.contests?.current_rating) {
+                combined.contest_ratings.codechef = data.contests.current_rating;
             }
             break;
         
         case 'leetcode':
-            if (data.detailed_stats?.contest_rating) {
-                combined.contest_ratings.leetcode = data.detailed_stats.contest_rating;
+            if (data.contests?.contestRating) {
+                combined.contest_ratings.leetcode = data.contests.contestRating;
             }
             break;
         
-// Add this case to the switch statement in aggregateCombinedMetrics function
-case 'hackerrank':
-    // Add to programming languages from language proficiency
-    if (data.detailed_stats?.language_proficiency) {
-        Object.keys(data.detailed_stats.language_proficiency).forEach(lang => {
-            combined.programming_languages.add(lang.toUpperCase());
-        });
-    }
-    
-    // Add to total contributions (problems solved)
-    combined.total_contributions += data.detailed_stats?.problems_solved || 0;
-    
-    // Add contest ratings if available
-    if (data.detailed_stats?.algorithms_score) {
-        combined.contest_ratings.hackerrank = data.detailed_stats.algorithms_score;
-    }
-    
-    // Add followers to social metrics
-    combined.total_followers += data.detailed_stats?.followers || 0;
-    
-    // Track domain expertise
-    if (data.detailed_stats?.strongest_domains) {
-        data.detailed_stats.strongest_domains.forEach(domain => {
-            if (!combined.domain_expertise) {
-                combined.domain_expertise = {};
+        case 'hackerrank':
+            // Add to programming languages from language proficiency
+            if (data.detailed_stats?.language_proficiency) {
+                Object.keys(data.detailed_stats.language_proficiency).forEach(lang => {
+                    combined.programming_languages.add(lang.toUpperCase());
+                });
             }
-            combined.domain_expertise[domain.domain] = domain.score;
-        });
-    }
-    break;
-
+            
+            // Add to total contributions (problems solved)
+            combined.total_contributions += data.detailed_stats?.problems_solved || 0;
+            
+            // Add contest ratings if available
+            if (data.detailed_stats?.algorithms_score) {
+                combined.contest_ratings.hackerrank = data.detailed_stats.algorithms_score;
+            }
+            
+            // Add followers to social metrics
+            combined.total_followers += data.detailed_stats?.followers || 0;
+            
+            // Track domain expertise
+            if (data.detailed_stats?.strongest_domains) {
+                data.detailed_stats.strongest_domains.forEach(domain => {
+                    if (!combined.domain_expertise) {
+                        combined.domain_expertise = {};
+                    }
+                    combined.domain_expertise[domain.domain] = domain.score;
+                });
+            }
+            break;
     }
 }
 
@@ -2388,582 +3237,49 @@ function calculateTotalStats(stats) {
     }
 }
 
-function getWeekOfYear(date) {
-    const start = new Date(date.getFullYear(), 0, 1);
-    const days = Math.floor((date - start) / (24 * 60 * 60 * 1000));
-    return Math.ceil((days + start.getDay() + 1) / 7);
-}
+// Usage examples:
+/*
+// Only return days with activity
+const compactHeatmap = generateUnifiedActivityHeatmap(platformData, {
+    includeInactiveDays: false
+});
 
-function calculateIntensity(count) {
-    if (count === 0) return 'none';
-    if (count <= 2) return 'low';
-    if (count <= 4) return 'medium';
-    if (count <= 8) return 'high';
-    return 'very_high';
-}
+// Custom date range
+const customHeatmap = generateUnifiedActivityHeatmap(platformData, {
+    dateRange: 'custom',
+    startDate: '2023-01-01',
+    endDate: '2024-12-31',
+    includeInactiveDays: false
+});
 
-function calculateActivityStreaks(activityArray) {
-    let currentStreak = 0;
-    let longestStreak = 0;
-    let tempStreak = 0;
-    
-    // Calculate current streak (from most recent day backwards)
-    for (let i = activityArray.length - 1; i >= 0; i--) {
-        if (activityArray[i].total > 0) {
-            if (i === activityArray.length - 1) currentStreak = 1;
-            else if (activityArray[i + 1].total > 0) currentStreak++;
-            else break;
-        } else break;
-    }
-    
-    // Calculate longest streak
-    for (let i = 0; i < activityArray.length; i++) {
-        if (activityArray[i].total > 0) {
-            tempStreak++;
-            longestStreak = Math.max(longestStreak, tempStreak);
-        } else {
-            tempStreak = 0;
-        }
-    }
-    
-    return { current_streak: currentStreak, longest_streak: longestStreak };
-}
+// Current year only
+const yearlyHeatmap = generateUnifiedActivityHeatmap(platformData, {
+    dateRange: 'year',
+    includeInactiveDays: false
+});
+*/
 
-function calculateWeeklyStats(activityArray) {
-    const weeks = {};
-    activityArray.forEach(day => {
-        const weekKey = `${day.week_of_year}-${new Date(day.date).getFullYear()}`;
-        if (!weeks[weekKey]) weeks[weekKey] = 0;
-        weeks[weekKey] += day.total;
-    });
-    
-    const weeklyTotals = Object.values(weeks);
-    return {
-        average: Number((weeklyTotals.reduce((sum, total) => sum + total, 0) / weeklyTotals.length).toFixed(2)),
-        max: Math.max(...weeklyTotals),
-        min: Math.min(...weeklyTotals)
-    };
-}
+// Usage examples:
+/*
+// Only return days with activity
+const compactHeatmap = generateUnifiedActivityHeatmap(platformData, {
+    includeInactiveDays: false
+});
 
-function calculateMonthlyStats(activityArray) {
-    const months = {};
-    activityArray.forEach(day => {
-        const monthKey = `${day.month}-${new Date(day.date).getFullYear()}`;
-        if (!months[monthKey]) months[monthKey] = 0;
-        months[monthKey] += day.total;
-    });
-    
-    return {
-        breakdown: months,
-        average: Number((Object.values(months).reduce((sum, total) => sum + total, 0) / Object.keys(months).length).toFixed(2))
-    };
-}
+// Custom date range
+const customHeatmap = generateUnifiedActivityHeatmap(platformData, {
+    dateRange: 'custom',
+    startDate: '2023-01-01',
+    endDate: '2024-12-31',
+    includeInactiveDays: false
+});
 
-function calculateDataQuality(platformData) {
-    const total = Object.keys(platformData).length;
-    const successful = Object.values(platformData).filter(p => p.status === 'OK').length;
-    return Number(((successful / total) * 100).toFixed(1));
-}
-
-function getMostActiveDay(activityArray) {
-    const maxActivity = Math.max(...activityArray.map(day => day.total));
-    const mostActive = activityArray.find(day => day.total === maxActivity);
-    return {
-        date: mostActive?.date || null,
-        activity_count: maxActivity,
-        platforms_active: mostActive?.platform_count || 0
-    };
-}
-
-function getMostActiveMonth(monthlyStats) {
-    let maxMonth = null;
-    let maxActivity = 0;
-    
-    Object.entries(monthlyStats.breakdown).forEach(([month, activity]) => {
-        if (activity > maxActivity) {
-            maxActivity = activity;
-            maxMonth = month;
-        }
-    });
-    
-    return { month: maxMonth, activity_count: maxActivity };
-}
-
-function calculateConsistencyScore(activityArray) {
-    const activeDays = activityArray.filter(day => day.total > 0).length;
-    const totalDays = activityArray.length;
-    return Number(((activeDays / totalDays) * 100).toFixed(1));
-}
-
-function calculatePlatformDiversity(activityArray) {
-    const platformUsage = {};
-    activityArray.forEach(day => {
-        Object.entries(day.platforms).forEach(([platform, count]) => {
-            if (count > 0) {
-                platformUsage[platform] = (platformUsage[platform] || 0) + 1;
-            }
-        });
-    });
-    
-    const activePlatforms = Object.keys(platformUsage).length;
-    return {
-        active_platforms: activePlatforms,
-        platform_usage: platformUsage,
-        diversity_score: Number((activePlatforms / 7 * 100).toFixed(1)) // Out of 7 total platforms
-    };
-}
-
-// ==========================================
-// DAILY ACTIVITY PROCESSING FOR HEATMAP
-// ==========================================
-
-function generateUnifiedActivityHeatmap(platformData) {
-    const today = new Date();
-    const yearAgo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate());
-    
-    // Initialize 365 days of data with consistent structure
-    const dailyActivity = {};
-    for (let d = new Date(yearAgo); d <= today; d.setDate(d.getDate() + 1)) {
-        const dateStr = d.toISOString().split('T')[0];
-        dailyActivity[dateStr] = {
-            date: dateStr,
-            total: 0,
-            platforms: {
-                leetcode: 0,
-                codeforces: 0,
-                codechef: 0,
-                github: 0,
-                geeksforgeeks: 0,
-                hackerrank: 0,
-                atcoder: 0
-            },
-            timestamp: Math.floor(d.getTime() / 1000),
-            weekday: d.getDay(), // 0 = Sunday, 6 = Saturday
-            week_of_year: getWeekOfYear(d),
-            month: d.getMonth() + 1
-        };
-    }
-
-    // Process each platform's activity
-    Object.entries(platformData).forEach(([platform, data]) => {
-        if (data.status === "OK") {
-            processPlatformActivity(platform, data, dailyActivity, yearAgo, today);
-        }
-    });
-
-    // Convert to array and add activity levels with enhanced metrics
-    const activityArray = Object.values(dailyActivity).map(day => ({
-        ...day,
-        level: calculateActivityLevel(day.total),
-        intensity: calculateIntensity(day.total),
-        platform_count: Object.values(day.platforms).filter(count => count > 0).length
-    }));
-
-    // Calculate streaks and advanced metrics
-    const streakData = calculateActivityStreaks(activityArray);
-    const weeklyStats = calculateWeeklyStats(activityArray);
-    const monthlyStats = calculateMonthlyStats(activityArray);
-
-    return {
-        metadata: {
-            date_range: {
-                start: yearAgo.toISOString().split('T')[0],
-                end: today.toISOString().split('T')[0]
-            },
-            total_days: activityArray.length,
-            data_quality: calculateDataQuality(platformData),
-            last_updated: new Date().toISOString()
-        },
-        daily_activity: activityArray,
-        summary_stats: {
-            total_active_days: activityArray.filter(day => day.total > 0).length,
-            total_contributions: activityArray.reduce((sum, day) => sum + day.total, 0),
-            max_daily_activity: Math.max(...activityArray.map(day => day.total)),
-            average_daily_activity: Number((activityArray.reduce((sum, day) => sum + day.total, 0) / activityArray.length).toFixed(2)),
-            current_streak: streakData.current_streak,
-            longest_streak: streakData.longest_streak,
-            platform_contributions: calculatePlatformContributions(activityArray),
-            most_active_day: getMostActiveDay(activityArray),
-            most_active_month: getMostActiveMonth(monthlyStats)
-        },
-        advanced_metrics: {
-            weekly_average: weeklyStats.average,
-            monthly_breakdown: monthlyStats.breakdown,
-            activity_distribution: {
-                level_0_days: activityArray.filter(d => d.level === 0).length,
-                level_1_days: activityArray.filter(d => d.level === 1).length,
-                level_2_days: activityArray.filter(d => d.level === 2).length,
-                level_3_days: activityArray.filter(d => d.level === 3).length,
-                level_4_days: activityArray.filter(d => d.level === 4).length
-            },
-            consistency_score: calculateConsistencyScore(activityArray),
-            platform_diversity: calculatePlatformDiversity(activityArray)
-        },
-        heatmap_config: {
-            color_scale: {
-                0: '#ebedf0',
-                1: '#9be9a8', 
-                2: '#40c463',
-                3: '#30a14e',
-                4: '#216e39'
-            },
-            cell_size: 11,
-            cell_gap: 3,
-            month_labels: true,
-            weekday_labels: true
-        }
-    };
-}
-
-function processPlatformActivity(platform, data, dailyActivity, startDate, endDate) {
-    switch (platform) {
-        case 'leetcode':
-            processLeetCodeActivity(data, dailyActivity, startDate, endDate);
-            break;
-        case 'codeforces':
-            processCodeForcesActivity(data, dailyActivity, startDate, endDate);
-            break;
-        case 'github':
-            processGitHubActivity(data, dailyActivity, startDate, endDate);
-            break;
-        case 'codechef':
-            processCodeChefActivity(data, dailyActivity, startDate, endDate);
-            break;
-        case 'geeksforgeeks':
-            processGeeksForGeeksActivity(data, dailyActivity, startDate, endDate);
-            break;
-        case 'hackerrank':
-            processHackerRankActivity(data, dailyActivity, startDate, endDate);
-            break;
-        case 'atcoder':
-            processAtCoderActivity(data, dailyActivity, startDate, endDate);
-            break;
-    }
-}
-
-function processLeetCodeActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        // Use the calendar data if available
-        if (data.calendar_data && data.calendar_data.dailyActivity) {
-            data.calendar_data.dailyActivity.forEach(day => {
-                const date = new Date(day.date);
-                if (date >= startDate && date <= endDate) {
-                    const dateStr = day.date;
-                    if (dailyActivity[dateStr]) {
-                        const submissions = day.platforms?.leetcode || day.total || 0;
-                        dailyActivity[dateStr].platforms.leetcode = submissions;
-                        dailyActivity[dateStr].total += submissions;
-                    }
-                }
-            });
-        }
-        // Fallback: use submission calendar data directly
-        else if (data.calendar_data && data.calendar_data.submissionCalendar) {
-            Object.entries(data.calendar_data.submissionCalendar).forEach(([timestamp, count]) => {
-                const date = new Date(parseInt(timestamp) * 1000);
-                if (date >= startDate && date <= endDate) {
-                    const dateStr = date.toISOString().split('T')[0];
-                    if (dailyActivity[dateStr]) {
-                        const submissions = parseInt(count) || 0;
-                        dailyActivity[dateStr].platforms.leetcode += submissions;
-                        dailyActivity[dateStr].total += submissions;
-                    }
-                }
-            });
-        }
-        // Final fallback: use recent submissions
-        else if (data.detailed_stats && data.detailed_stats.recent_submissions) {
-            data.detailed_stats.recent_submissions.forEach(submission => {
-                if (submission.timestamp) {
-                    const date = new Date(parseInt(submission.timestamp) * 1000);
-                    if (date >= startDate && date <= endDate) {
-                        const dateStr = date.toISOString().split('T')[0];
-                        if (dailyActivity[dateStr]) {
-                            dailyActivity[dateStr].platforms.leetcode += 1;
-                            dailyActivity[dateStr].total += 1;
-                        }
-                    }
-                }
-            });
-        }
-    } catch (error) {
-        console.log('Error processing LeetCode activity:', error.message);
-    }
-}
-
-
-function processCodeForcesActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        // Use contest data for more accurate activity distribution
-        if (data.contests && data.contests.ratingProgression) {
-            data.contests.ratingProgression.forEach(contest => {
-                const date = new Date(contest.date);
-                if (date >= startDate && date <= endDate) {
-                    const dateStr = date.toISOString().split('T')[0];
-                    if (dailyActivity[dateStr]) {
-                        // Contest participation counts as higher activity
-                        dailyActivity[dateStr].platforms.codeforces += 5;
-                        dailyActivity[dateStr].total += 5;
-                    }
-                }
-            });
-        }
-        
-        // Distribute problems solved over recent period
-        const problemsSolved = data.detailed_stats?.problems_solved || 0;
-        if (problemsSolved > 0) {
-            const recentDays = Math.min(90, Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)));
-            let remaining = Math.floor(problemsSolved * 0.3); // Assume 30% in recent period
-            
-            for (let i = 0; i < recentDays && remaining > 0; i++) {
-                const date = new Date(endDate);
-                date.setDate(date.getDate() - i);
-                const dateStr = date.toISOString().split('T')[0];
-                
-                // Skip contest days to avoid double counting
-                if (dailyActivity[dateStr] && dailyActivity[dateStr].platforms.codeforces === 0 && Math.random() < 0.25) {
-                    const activity = Math.min(remaining, Math.floor(Math.random() * 3) + 1);
-                    dailyActivity[dateStr].platforms.codeforces += activity;
-                    dailyActivity[dateStr].total += activity;
-                    remaining -= activity;
-                }
-            }
-        }
-    } catch (error) {
-        console.log('Error processing CodeForces activity:', error.message);
-    }
-}
-
-function processGitHubActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        // Process recent activity events
-        if (data.recent_activity && Array.isArray(data.recent_activity)) {
-            data.recent_activity.forEach(event => {
-                const date = new Date(event.created_at);
-                
-                if (date >= startDate && date <= endDate) {
-                    const dateStr = date.toISOString().split('T')[0];
-                    if (dailyActivity[dateStr]) {
-                        let activityCount = 1;
-                        
-                        // Weight different event types
-                        switch (event.type) {
-                            case 'PushEvent':
-                                activityCount = event.payload?.commits?.length || 1;
-                                break;
-                            case 'PullRequestEvent':
-                                activityCount = 2;
-                                break;
-                            case 'IssuesEvent':
-                                activityCount = 1;
-                                break;
-                            case 'CreateEvent':
-                                activityCount = 1;
-                                break;
-                            default:
-                                activityCount = 1;
-                        }
-                        
-                        dailyActivity[dateStr].platforms.github += activityCount;
-                        dailyActivity[dateStr].total += activityCount;
-                    }
-                }
-            });
-        }
-        
-        // Fallback: distribute repository activity over time
-        else {
-            const publicRepos = data.detailed_stats?.public_repos || 0;
-            const recentActivity = data.detailed_stats?.recent_activity || {};
-            
-            if (publicRepos > 0) {
-                // Distribute recent commits/pushes over last 30 days
-                const recentDays = Math.min(30, Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)));
-                const totalActivity = recentActivity.recent_pushes || Math.min(publicRepos, 50);
-                
-                for (let i = 0; i < recentDays && totalActivity > 0; i++) {
-                    const date = new Date(endDate);
-                    date.setDate(date.getDate() - i);
-                    const dateStr = date.toISOString().split('T')[0];
-                    
-                    if (dailyActivity[dateStr] && Math.random() < 0.3) {
-                        const activity = Math.min(totalActivity, Math.floor(Math.random() * 3) + 1);
-                        dailyActivity[dateStr].platforms.github += activity;
-                        dailyActivity[dateStr].total += activity;
-                    }
-                }
-            }
-        }
-    } catch (error) {
-        console.log('Error processing GitHub activity:', error.message);
-    }
-}
-
-function processCodeChefActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        // CodeChef doesn't provide daily submission data
-        // Estimate based on problems solved and contests attended
-        const problemsSolved = data.detailed_stats?.problems_solved || 0;
-        const contestsAttended = data.detailed_stats?.contests_attended || 0;
-        
-        if (problemsSolved > 0) {
-            // Distribute over last 6 months
-            const activeDays = Math.min(180, Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)));
-            let remaining = problemsSolved;
-            
-            for (let i = 0; i < activeDays && remaining > 0; i++) {
-                const date = new Date(endDate);
-                date.setDate(date.getDate() - i);
-                const dateStr = date.toISOString().split('T')[0];
-                
-                if (dailyActivity[dateStr] && Math.random() < 0.25) {
-                    const activity = Math.min(remaining, Math.floor(Math.random() * 2) + 1);
-                    dailyActivity[dateStr].platforms.codechef += activity;
-                    dailyActivity[dateStr].total += activity;
-                    remaining -= activity;
-                }
-            }
-        }
-    } catch (error) {
-        console.log('Error processing CodeChef activity:', error.message);
-    }
-}
-
-function processGeeksForGeeksActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        const problemsSolved = data.detailed_stats?.problems_solved || 0;
-        
-        if (problemsSolved > 0) {
-            // Distribute over last 4 months with streak consideration
-            const currentStreak = data.detailed_stats?.current_streak || 0;
-            const activeDays = Math.min(120, Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)));
-            
-            // Add recent streak activity
-            for (let i = 0; i < Math.min(currentStreak, 30); i++) {
-                const date = new Date(endDate);
-                date.setDate(date.getDate() - i);
-                const dateStr = date.toISOString().split('T')[0];
-                
-                if (dailyActivity[dateStr]) {
-                    dailyActivity[dateStr].platforms.geeksforgeeks += 1;
-                    dailyActivity[dateStr].total += 1;
-                }
-            }
-            
-            // Distribute remaining problems
-            let remaining = Math.max(0, problemsSolved - currentStreak);
-            for (let i = currentStreak; i < activeDays && remaining > 0; i++) {
-                const date = new Date(endDate);
-                date.setDate(date.getDate() - i);
-                const dateStr = date.toISOString().split('T')[0];
-                
-                if (dailyActivity[dateStr] && Math.random() < 0.2) {
-                    const activity = Math.min(remaining, Math.floor(Math.random() * 2) + 1);
-                    dailyActivity[dateStr].platforms.geeksforgeeks += activity;
-                    dailyActivity[dateStr].total += activity;
-                    remaining -= activity;
-                }
-            }
-        }
-    } catch (error) {
-        console.log('Error processing GeeksForGeeks activity:', error.message);
-    }
-}
-
-function processHackerRankActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        const problemsSolved = data.detailed_stats?.problems_solved || 0;
-        const contestMedals = data.detailed_stats?.contest_medals || { gold: 0, silver: 0, bronze: 0 };
-        const totalMedals = contestMedals.gold + contestMedals.silver + contestMedals.bronze;
-        
-        // Add contest activity first (medals indicate contest participation)
-        if (totalMedals > 0) {
-            // Distribute contest activity over past 6 months
-            const contestDays = Math.min(totalMedals * 2, 50); // Estimate contest days
-            for (let i = 0; i < contestDays; i++) {
-                const daysBack = Math.floor(Math.random() * 180); // Random within 6 months
-                const date = new Date(endDate);
-                date.setDate(date.getDate() - daysBack);
-                const dateStr = date.toISOString().split('T')[0];
-                
-                if (dailyActivity[dateStr]) {
-                    dailyActivity[dateStr].platforms.hackerrank += 3; // Contest day bonus
-                    dailyActivity[dateStr].total += 3;
-                }
-            }
-        }
-        
-        // Distribute practice problems over recent period
-        if (problemsSolved > 0) {
-            const activeDays = Math.min(120, Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)));
-            let remaining = Math.floor(problemsSolved * 0.4); // 40% in recent period
-            
-            for (let i = 0; i < activeDays && remaining > 0; i++) {
-                const date = new Date(endDate);
-                date.setDate(date.getDate() - i);
-                const dateStr = date.toISOString().split('T')[0];
-                
-                if (dailyActivity[dateStr] && Math.random() < 0.25) {
-                    const activity = Math.min(remaining, Math.floor(Math.random() * 4) + 1);
-                    dailyActivity[dateStr].platforms.hackerrank += activity;
-                    dailyActivity[dateStr].total += activity;
-                    remaining -= activity;
-                }
-            }
-        }
-    } catch (error) {
-        console.log('Error processing HackerRank activity:', error.message);
-    }
-}
-
-function processAtCoderActivity(data, dailyActivity, startDate, endDate) {
-    try {
-        const submissions = data.submissions || [];
-        
-        submissions.forEach(submission => {
-            const timestamp = submission.epoch_second * 1000;
-            const date = new Date(timestamp);
-            
-            if (date >= startDate && date <= endDate && submission.result === 'AC') {
-                const dateStr = date.toISOString().split('T')[0];
-                if (dailyActivity[dateStr]) {
-                    dailyActivity[dateStr].platforms.atcoder += 1;
-                    dailyActivity[dateStr].total += 1;
-                }
-            }
-        });
-    } catch (error) {
-        console.log('Error processing AtCoder activity:', error.message);
-    }
-}
-
-function calculateActivityLevel(count) {
-    if (count === 0) return 0;
-    if (count <= 2) return 1;
-    if (count <= 4) return 2;
-    if (count <= 6) return 3;
-    return 4;
-}
-
-function calculatePlatformContributions(activityArray) {
-    const contributions = {
-        leetcode: 0,
-        codeforces: 0,
-        codechef: 0,
-        github: 0,
-        geeksforgeeks: 0,
-        hackerrank: 0,
-        atcoder: 0
-    };
-    
-    activityArray.forEach(day => {
-        Object.keys(contributions).forEach(platform => {
-            contributions[platform] += day.platforms[platform] || 0;
-        });
-    });
-    
-    return contributions;
-}
+// Current year only
+const yearlyHeatmap = generateUnifiedActivityHeatmap(platformData, {
+    dateRange: 'year',
+    includeInactiveDays: false
+});
+*/
 
 
 
